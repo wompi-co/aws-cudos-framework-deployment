@@ -3,10 +3,10 @@ variable "stack_name" {
   description = "CloudFormation stack name for Cloud Intelligence Dashboards deployment"
 }
 
-variable "template_bucket" {
-  type        = string
-  description = "S3 bucket where the Cloudformation template will be uploaded. Must already exist and be in the same region as the stack."
-}
+# variable "template_bucket" {
+#   type        = string
+#   description = "S3 bucket where the Cloudformation template will be uploaded. Must already exist and be in the same region as the stack."
+# }
 
 variable "template_key" {
   type        = string
@@ -63,4 +63,10 @@ variable "stack_iam_role" {
   type        = string
   description = "The ARN of an IAM role that AWS CloudFormation assumes to create the stack (default behavior is to use the previous role if available, or current user permissions otherwise)."
   default     = null
+}
+
+variable "cfn_template_url" {
+  type        = string
+  description = "URL of the CloudFormation template"
+
 }
