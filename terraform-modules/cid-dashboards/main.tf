@@ -8,6 +8,8 @@ resource "aws_s3_object" "template" {
   source = "${path.module}/../../cfn-templates/cid-cfn.yml"
   etag   = filemd5("${path.module}/../../cfn-templates/cid-cfn.yml")
   acl    = "private"
+  server_side_encryption = "AES256"
+
 }
 
 resource "aws_cloudformation_stack" "cid" {
