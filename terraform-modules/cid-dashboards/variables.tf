@@ -64,3 +64,8 @@ variable "stack_iam_role" {
   description = "The ARN of an IAM role that AWS CloudFormation assumes to create the stack (default behavior is to use the previous role if available, or current user permissions otherwise)."
   default     = null
 }
+
+# variable "template_url" {
+#   type        = string
+#   description = "URL of the CloudFormation template"
+# }
