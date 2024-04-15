@@ -2,12 +2,13 @@ import re
 import json
 import uuid
 import time
+import datetime
 import logging
-from pkg_resources import resource_string
 from string import Template
 from typing import Dict, List, Union
+from pkg_resources import resource_string
 
-import click
+from tqdm import tqdm
 
 from cid.base import CidBase
 from cid.helpers import diff, timezone, randtime
@@ -15,7 +16,7 @@ from cid.helpers.quicksight.dashboard import Dashboard
 from cid.helpers.quicksight.dataset import Dataset
 from cid.helpers.quicksight.datasource import Datasource
 from cid.helpers.quicksight.template import Template as CidQsTemplate
-from cid.utils import get_parameter, get_parameters, exec_env, cid_print
+from cid.utils import get_parameter, get_parameters, exec_env, cid_print, ago, unset_parameter
 from cid.exceptions import CidCritical, CidError
 
 logger = logging.getLogger(__name__)
@@ -48,7 +49,7 @@ class QuickSight(CidBase):
     @property
     def AthenaWorkGroup(self) -> str:
         return self._AthenaWorkGroup
-    
+
     @AthenaWorkGroup.setter
     def AthenaWorkGroup(self, value):
         self._AthenaWorkGroup = value
@@ -90,10 +91,10 @@ class QuickSight(CidBase):
                 }
                 self.client.describe_user(**parameters)
                 self._identityRegion = self.region
-            except self.client.exceptions.AccessDeniedException as e:
-                logger.debug(e)
+            except self.client.exceptions.AccessDeniedException as exc:
+                logger.debug(exc)
                 pattern = f'Operation is being called from endpoint {self.region}, but your identity region is (.*). Please use the (.*) endpoint.'
-                match = re.search(pattern, e.response['Error']['Message'])
+                match = re.search(pattern, exc.response['Error']['Message'])
                 if match:
                     logger.info(f'Switching QuickSight identity region to {match.group(1)}')
                     self._identityRegion = match.group(1)
@@ -102,8 +103,8 @@ class QuickSight(CidBase):
             except self.client.exceptions.ResourceNotFoundException:
                 logger.info(f'QuickSight identity region detection failed, using {self.region}')
                 self._identityRegion = self.region
-            except Exception as e:
-                logger.debug(e, exc_info=True)
+            except Exception as exc:
+                logger.debug(exc, exc_info=True)
                 logger.info(f'QuickSight identity region detection failed, using {self.region}')
                 self._identityRegion = self.region
             logger.info(f'Using QuickSight identity region: {self._identityRegion}')
@@ -163,14 +164,14 @@ class QuickSight(CidBase):
     def ensure_subscription(self) -> None:
         """Ensure that the QuickSight subscription is active"""
         if not self.edition(fresh=True):
-            raise CidCritical('QuickSight is not activated. Plase run `cid-cmd initqs` command, or activate QuickSight from the console.')
+            raise CidCritical('QuickSight is not activated. Please run `cid-cmd initqs` command, or activate QuickSight Enterprise Edition from the console.')
         if self.edition() == 'STANDARD':
             raise CidCritical(f'QuickSight Enterprise edition is required, you have {self.edition}.')
         logger.info(f'QuickSight subscription: {self._subscription_info}')
 
     def describe_account_subscription(self) -> dict:
         """Returns the account subscription details"""
-        result = dict()
+        result = {}
 
         try:
             result = self.client.describe_account_subscription(AwsAccountId=self.account_id).get('AccountInfo')
@@ -207,7 +208,7 @@ class QuickSight(CidBase):
         _definition = next((v for v in self.supported_dashboards.values() if v['dashboardId'] == dashboard.id), None)
         if not _definition:
             # Look for dashboard definition by templateId.
-            # This is for a specific usecase when a dashboard with another id points to managed template
+            # This is for a specific use-case when a dashboard with another id points to managed template
             source_arn = dashboard.raw.get('Version', {}).get('SourceEntityArn', '')
             if source_arn:
                 template_id = source_arn.split('/version/')[0].split('/')[-1]
@@ -222,7 +223,7 @@ class QuickSight(CidBase):
         dashboard.definition = _definition
         logger.info(f'Found definition for "{dashboard.name}" ({dashboard.template_arn})')
 
-        # Check for extra informations from resource definition
+        # Check for extra information from resource definition
         version_obj = _definition.get('versions', dict())
         min_template_version = _safe_int(version_obj.get('minTemplateVersion'))
         default_description_version = version_obj.get('minTemplateDescription')
@@ -250,15 +251,15 @@ class QuickSight(CidBase):
                     _template = self.describe_template(**params)
                     if isinstance(_template, CidQsTemplate):
                         dashboard.deployedTemplate = _template
-                except Exception as e:
-                    logger.debug(e, exc_info=True)
-                    logger.info(f'Unable to describe template for {dashboardId}, {e}')
+                except Exception as exc:
+                    logger.debug(exc, exc_info=True)
+                    logger.info(f'Unable to describe template for {dashboardId}, {exc}')
             else:
                 logger.info("Minimum template version could not be found for Dashboard {dashboardId}: {_template_arn}, deployed template could not be described")
 
 
         # Fetch datasets
-        for dataset in dashboard.version.get('DataSetArns'):
+        for dataset in dashboard.version.get('DataSetArns', []):
             dataset_id = dataset.split('/')[-1]
             try:
                 _dataset = self.describe_dataset(id=dataset_id)
@@ -282,8 +283,8 @@ class QuickSight(CidBase):
                 logger.debug(f'Loading latest source template {template_id} from source account {source_template_account_id} in {region}')
                 template = self.describe_template(template_id, account_id=source_template_account_id, region=region)
                 dashboard.sourceTemplate = template
-            except Exception as e:
-                logger.debug(e, exc_info=True)
+            except Exception as exc:
+                logger.debug(exc, exc_info=True)
                 logger.info(f'Unable to describe template {template_id} in {source_template_account_id} ({region})')
 
         # Checking for version override in template definition
@@ -291,7 +292,7 @@ class QuickSight(CidBase):
             if not isinstance(dashboard_template, CidQsTemplate)\
                 or int(dashboard_template.version) <= 0 \
                 or not version_obj:
-                    continue
+                continue
 
             logger.debug("versions object found in template")
             version_map = version_obj.get('versionMap', dict())
@@ -299,7 +300,7 @@ class QuickSight(CidBase):
 
             try:
                 if description_override:
-                    logger.info(f"Template description is overrided with: {description_override}")
+                    logger.info(f"Template description is overridden with: {description_override}")
                     description_override = str(description_override)
                     dashboard_template.raw['Version']['Description'] = description_override
                 else:
@@ -310,19 +311,19 @@ class QuickSight(CidBase):
             except ValueError as val_error:
                 logger.debug(val_error,  exc_info=True)
                 logger.info("The provided values of the versions object are not well formed, please use int for template version and str for template description")
-            except Exception as e:
-                logger.debug(e, exc_info=True)
+            except Exception as exc:
+                logger.debug(exc, exc_info=True)
                 logger.info("Unable to override template description")
 
         # Fetch all views recursively
         all_views = []
-        def _recoursive_add_view(view):
+        def _recursive_add_view(view):
             all_views.append(view)
             for dep_view in (self.supported_views.get(view) or {}).get('dependsOn', {}).get('views', []):
-                _recoursive_add_view(dep_view)
-        for dataset_name in dashboard.datasets.keys():
+                _recursive_add_view(dep_view)
+        for dataset_name in dashboard.datasets:
             for view in (self.supported_datasets.get(dataset_name) or {}).get('dependsOn', {}).get('views', []):
-                _recoursive_add_view(view)
+                _recursive_add_view(view)
         dashboard.views = all_views
         self._dashboards = self._dashboards or {}
         self._dashboards[dashboardId] = dashboard
@@ -343,9 +344,9 @@ class QuickSight(CidBase):
                 Namespace='default',
                 Description=description,
             ).get('Group')
-        except self.client.exceptions.AccessDeniedException as e:
+        except self.client.exceptions.AccessDeniedException as exc:
             raise CidCritical('Cannot access groups. (AccessDenied). Please use quicksight-user parameter '
-                'or ensure you have permissions quicksight::DescribeGroup and quicksight::CreateGroup')
+                'or ensure you have permissions quicksight::DescribeGroup and quicksight::CreateGroup') from exc
         return group
 
 
@@ -367,7 +368,7 @@ class QuickSight(CidBase):
         auth_type = self.describe_account_subscription().get('AuthenticationType')
         if auth_type not in ["ACTIVE_DIRECTORY", 'IAM_IDENTITY_CENTER']:
             choices = [
-                'group cid-owners (recommended)', 
+                'group cid-owners (recommended)',
                 'select group',
                 f'current user {self.username}',
                 'select user',
@@ -392,7 +393,7 @@ class QuickSight(CidBase):
             if not self._user:
                 self._user = self.select_user() # fallback to user choice
             if not self._user:
-                raise CidCritical('Cannot get QuickSight username. Is Enteprise subscription activated in QuickSight?')
+                raise CidCritical('Cannot get QuickSight username. Is Enterprise subscription activated in QuickSight?')
             logger.info(f"Using QuickSight user {self._user.get('UserName')}")
             self._principal_arn = self._user.get('Arn')
 
@@ -405,7 +406,7 @@ class QuickSight(CidBase):
         elif quicksight_owner.startswith("select user"):
             self._user = self.select_user()
             if not self._user:
-                raise CidCritical('Cannot get QuickSight username. Is Enteprise subscription activated in QuickSight?')
+                raise CidCritical('Cannot get QuickSight username. Is Enterprise subscription activated in QuickSight?')
             self._principal_arn = self._user.get('Arn')
 
         elif quicksight_owner.startswith("group cid-owners"):
@@ -426,7 +427,7 @@ class QuickSight(CidBase):
         }
         data_source_permissions_tpl = Template(resource_string(
             package_or_requirement='cid.builtin.core',
-            resource_name=f'data/permissions/data_source_permissions.json',
+            resource_name='data/permissions/data_source_permissions.json',
         ).decode('utf-8'))
         data_source_permissions = json.loads(data_source_permissions_tpl.safe_substitute(columns_tpl))
         datasource_name = datasource_id or "CID Athena"
@@ -452,14 +453,19 @@ class QuickSight(CidBase):
             create_status = self.client.create_data_source(**params)
             logger.debug(f'Data source creation result {create_status}')
             # Wait for the datasource completion
-            while True:
+            for _ in tqdm(range(60), desc='DataSet Creation', leave=False):
                 time.sleep(1)
                 datasource = self.describe_data_source(datasource_id, update=True)
                 logger.debug(f'Waiting for datasource {datasource_id}. current status={datasource.status}')
                 if not datasource.status.endswith('IN_PROGRESS'):
                     break
             if not datasource.is_healthy:
-                logger.error(f'Data source creation failed: {datasource.error_info}')
+                logger.error(f'Data source creation failed: {datasource.error_info}.')
+                if "The QuickSight service role required to access your AWS resources has not been created yet." in str(datasource.error_info):
+                    logger.error(
+                        'Please check that QuickSight has a default role that can access S3 Buckets and Athena https://quicksight.aws.amazon.com/sn/admin?#aws '
+                        'OR provide a custom datasource role as a parameter --quicksight-datasource-role-arn'
+                    )
                 if get_parameter(
                     param_name='quicksight-delete-failed-datasource',
                     message=f'Data source creation failed: {datasource.error_info}. Delete?',
@@ -467,16 +473,30 @@ class QuickSight(CidBase):
                 ) == 'yes':
                     try:
                         self.delete_data_source(datasource.id)
-                    except self.client.exceptions.AccessDeniedException as e:
+                    except self.client.exceptions.AccessDeniedException:
                         logger.info('Access denied deleting Athena datasource')
                 return None
+            for _ in tqdm(range(5), desc='Waiting for Data Source', leave=False):
+                time.sleep(1)
             return datasource
         except self.client.exceptions.ResourceExistsException:
-            logger.error('Data source already exists')
-            return self.describe_data_source(datasource_id, update=True)
-        except self.client.exceptions.AccessDeniedException as e:
+            datasource = self.describe_data_source(datasource_id, update=True)
+            logger.error(f'Data source already exists {datasource.raw}')
+            if not datasource.is_healthy:
+                if get_parameter(
+                    param_name='quicksight-delete-failed-datasource',
+                    message=f'Data source creation failed: {datasource.error_info}. Delete?',
+                    choices=['yes', 'no'],
+                ) == 'yes':
+                    try:
+                        self.delete_data_source(datasource.id)
+                        raise CidCritical('Issue on datasource creation. Please retry.')
+                    except self.client.exceptions.AccessDeniedException:
+                        raise CidCritical('Access denied deleting datasource in QS. Please cleanup manually and retry.')
+            return datasource
+        except self.client.exceptions.AccessDeniedException as exc:
             logger.info('Access denied creating Athena datasource')
-            logger.debug(e, exc_info=True)
+            logger.debug(exc, exc_info=True)
             return None
         return None
 
@@ -546,10 +566,10 @@ class QuickSight(CidBase):
             for v in self.datasets.values():
                 for d in v.datasources:
                     self.describe_data_source(d)
-        except Exception as e:
-            logger.debug(e, exc_info=True)
+        except Exception as exc:
+            logger.debug(exc, exc_info=True)
 
-    def discover_dashboards(self, display: bool=False, refresh: bool=False) -> None:
+    def discover_dashboards(self, refresh: bool=False) -> None:
         """ Discover deployed dashboards """
         if refresh or self._dashboards is None:
             self._dashboards = {}
@@ -557,31 +577,14 @@ class QuickSight(CidBase):
         deployed_dashboards=self.list_dashboards()
         logger.info(f'Found {len(deployed_dashboards)} deployed dashboards')
         logger.debug(deployed_dashboards)
-        with click.progressbar(
-            length=len(deployed_dashboards),
-            label='Discovering deployed dashboards...',
-            item_show_func=lambda a: str(a)[:50]
-        ) as bar:
-            for dashboard in deployed_dashboards:
-                # Discover found dashboards
-                dashboardName = dashboard.get('Name')
-                dashboardId = dashboard.get('DashboardId')
-                # Update progress bar
-                bar.update(1, f'"{dashboardName}" ({dashboardId})')
-                logger.info(f'Discovering dashboard "{dashboardName}" ({dashboardId})')
-                self.discover_dashboard(dashboardId)
-                # Update progress bar
-                bar.update(0, 'Complete')
-        # print('Discovered dashboards:')
-        if not display:
-            return
-        for dashboard in self._dashboards.values():
-            if dashboard.health:
-                health = 'healthy' 
-            else:
-                health = 'unhealthy'
-            print(f'\t{dashboard.name} ({dashboard.id}, {health}, {dashboard.status})')
-
+        bar = tqdm(deployed_dashboards, desc='Discovering Dashboards', leave=False)
+        for dashboard in bar:
+            # Discover found dashboards
+            dashboard_name = dashboard.get('Name')
+            dashboard_id = dashboard.get('DashboardId')
+            bar.set_description(f'Discovering {dashboard_name[:10]:<10}', refresh=True)
+            logger.info(f'Discovering "{dashboard_name}"')
+            self.discover_dashboard(dashboard_id)
 
     def list_dashboards(self) -> list:
         parameters = {
@@ -590,13 +593,13 @@ class QuickSight(CidBase):
         try:
             result = self.client.list_dashboards(**parameters)
             if result.get('Status') != 200:
-                raise CidCritical(f'list_dashboards: {result}')
+                raise CidCritical(f'list_dashboards returns: {result}')
             else:
                 logger.debug(result)
                 return result.get('DashboardSummaryList')
-        except Exception as e:
-            logger.debug(e, exc_info=True)
-            return list()
+        except Exception as exc:
+            logger.debug(exc, exc_info=True)
+            return []
 
     def list_data_sources(self) -> list:
         parameters = {
@@ -610,14 +613,16 @@ class QuickSight(CidBase):
         except self.client.exceptions.AccessDeniedException:
             logger.info('Access denied listing data sources')
             raise
-        except Exception as e:
-            logger.debug(e, exc_info=True)
+        except Exception as exc:
+            logger.debug(exc, exc_info=True)
             return list()
+
+    def clear_dashboard_selection (self):
+        """ Clears the current dashboard selection. """
+        unset_parameter('dashboard-id')
 
     def select_dashboard(self, force=False) -> str:
         """ Select from a list of discovered dashboards """
-        selection = list()
-
         dashboard_id = get_parameters().get('dashboard-id')
         if dashboard_id:
             return dashboard_id
@@ -626,31 +631,53 @@ class QuickSight(CidBase):
             return None
         choices = {}
         for dashboard in self.dashboards.values():
-            health = 'healthy' if dashboard.health else 'unhealthy'
-            key = f'{dashboard.name} ({dashboard.arn}, {health}, {dashboard.status})'
-            if ((dashboard.latest or not dashboard.health) and not force):
+            health = '' if dashboard.health else ' UNHEALTHY'
+            status = '' if dashboard.status == 'up to date' else ' ' + dashboard.status.upper()
+            key = f'{dashboard.name} ({dashboard.arn.split("/")[-1]}){health}{status}'
+            notice = dashboard.definition.get('deprecationNotice', '')
+            if notice:
+                key = f'{key} {notice}'
+            if ((dashboard.latest or not dashboard.health or notice) and not force):
                 choices[key] = None
             else:
                 choices[key] = dashboard.id
+
         try:
             dashboard_id = get_parameter(
                 param_name='dashboard-id',
-                message="Please select installation(s) from the list",
+                message="Please select dashboard from the list",
                 choices=choices,
                 none_as_disabled=True,
             )
-        except AttributeError as e:
+        except AttributeError as exc:
             # No updatable dashboards (selection is disabled)
-            logger.debug(e, exc_info=True)
-        except Exception as e:
-            logger.exception(e)
+            logger.debug(exc, exc_info=True)
+        except Exception as exc:
+            logger.exception(exc)
         finally:
             return dashboard_id
 
     def select_user(self):
         """ Select a user from the list of users """
+        all_users = []
+        next_token = None
         try:
-            user_list = self.identityClient.list_users(AwsAccountId=self.account_id, Namespace='default').get('UserList')
+            while True:
+                if next_token:
+                    response = self.identityClient.list_users(AwsAccountId=self.account_id, Namespace='default', NextToken=next_token)
+                else:
+                    response = self.identityClient.list_users(AwsAccountId=self.account_id, Namespace='default')
+
+                user_list = response.get('UserList', [])
+                all_users.extend(user_list)
+
+                next_token = response.get('NextToken')
+                if not next_token:
+                    break
+
+            # Sort the users by UserName
+            user_list = sorted(all_users, key=lambda x: x.get('UserName'))
+
         except self.client.exceptions.AccessDeniedException as exc:
             raise CidCritical('AccessDenied for listing users, your can explicitly provide --quicksight-user parameter') from exc
 
@@ -673,7 +700,7 @@ class QuickSight(CidBase):
         group_name = get_parameter(
             param_name='quicksight-group',
             message="Please select QuickSight Group to use",
-            choices={f"{user.get('UserName')} ({user.get('Email')}, {user.get('Role')})":user.get('UserName') for user in groups}
+            choices={f"{group.get('GroupName')} ({group.get('Description')})":group.get('GroupName') for group in groups}
         )
         for group in groups:
             if group.get('GroupName') == group_name:
@@ -691,8 +718,8 @@ class QuickSight(CidBase):
                 return result.get('DataSetSummaries')
         except self.client.exceptions.AccessDeniedException:
             raise
-        except Exception as e:
-            logger.debug(e, exc_info=True)
+        except Exception as exc:
+            logger.debug(exc, exc_info=True)
             return None
 
 
@@ -705,13 +732,13 @@ class QuickSight(CidBase):
             if result.get('Status') != 200:
                  raise CidCritical(f'list_folders: {result}')
             else:
-                logger.debug(f"FolderList: {result.get('FolderSummaryList')}")
+                logger.debug(f"Folder_list: {result.get('FolderSummaryList')}")
                 return result.get('FolderSummaryList')
         except self.client.exceptions.AccessDeniedException:
             logger.info('Access denied listing folders')
             raise
-        except Exception as e:
-            logger.debug(e, exc_info=True)
+        except Exception as exc:
+            logger.debug(exc, exc_info=True)
             return None
 
 
@@ -728,24 +755,25 @@ class QuickSight(CidBase):
             else:
                 logger.debug(result.get('Folder'))
                 return result.get('Folder')
-        except Exception as e:
-            logger.debug(e, exc_info=True)
+        except Exception as exc:
+            logger.debug(exc, exc_info=True)
             return None
 
 
     def select_folder(self):
         """ Select a folder from the list of folders """
         try:
-            folderList = self.list_folders()
-            if not folderList:
+            folder_list = self.list_folders()
+            if not folder_list:
                 return None
         except self.client.exceptions.AccessDeniedException:
+            logger.error('AccessDeniedException on listing folders')
             raise
 
         _folder = get_parameter(
             param_name='folder-id',
             message="Please select QuickSight folder to use",
-            choices={f"{folder.get('Name')} ({folder.get('FolderId')})":folder for folder in folderList}
+            choices={f"{folder.get('Name')} ({folder.get('FolderId')})":folder for folder in folder_list}
         )
         return _folder
 
@@ -775,7 +803,7 @@ class QuickSight(CidBase):
                     time.sleep(5)
                     continue
                 logger.debug(response)
-                dashboard = Dashboard(response)
+                dashboard = Dashboard(response, qs=self)
                 current_status = dashboard.version.get('Status')
                 if not poll:
                     break
@@ -783,32 +811,36 @@ class QuickSight(CidBase):
             return dashboard
         except self.client.exceptions.ResourceNotFoundException:
             return None
-        except self.client.exceptions.UnsupportedUserEditionException:
-            raise CidCritical('Error: AWS QuickSight Enterprise Edition is required')
-        except Exception as e:
-            print(f'Error: {e}')
+        except self.client.exceptions.UnsupportedUserEditionException as exc:
+            raise CidCritical('Error: AWS QuickSight Enterprise Edition is required') from exc
+        except Exception as exc:
+            logger.error(f'Error in describe_dashboard: {exc}')
             raise
 
     def delete_dashboard(self, dashboard_id):
         """ Deletes an AWS QuickSight dashboard """
-        paramaters = {
+        params = {
             'AwsAccountId': self.account_id,
             'DashboardId': dashboard_id
         }
         logger.info(f'Deleting dashboard {dashboard_id}')
-        result = self.client.delete_dashboard(**paramaters)
+        result = self.client.delete_dashboard(**params)
         del self._dashboards[dashboard_id]
         return result
 
     def delete_data_source(self, datasource_id):
         """ Deletes an AWS QuickSight dashboard """
-        paramaters = {
+        params = {
             'AwsAccountId': self.account_id,
             'DataSourceId': datasource_id
         }
         logger.info(f'Deleting DataSource {datasource_id}')
-        result = self.client.delete_data_source(**paramaters)
-        if datasource_id in self._datasources:
+        try:
+            result = self.client.delete_data_source(**params)
+        except self.client.exceptions.ResourceNotFoundException:
+            logger.info(f'Deleting DataSource {datasource_id} not needed as it is does not exist')
+            result = True
+        if datasource_id in (self._datasources or []):
             del self._datasources[datasource_id]
         return result
 
@@ -875,9 +907,9 @@ class QuickSight(CidBase):
         deadline = time.time() + timeout
         while time.time() <= deadline:
             try:
-                _dataset = Dataset(self.client.describe_data_set(AwsAccountId=self.account_id,DataSetId=id).get('DataSet'))
+                _dataset = Dataset(self.client.describe_data_set(AwsAccountId=self.account_id, DataSetId=id).get('DataSet'))
                 logger.info(f'Saving dataset details "{_dataset.name}" ({_dataset.id})')
-                self._datasets.update({_dataset.id: _dataset})
+                self._datasets[_dataset.id] = _dataset
                 break
             except self.client.exceptions.ResourceNotFoundException:
                 logger.info(f'DataSetId {id} not found')
@@ -886,8 +918,38 @@ class QuickSight(CidBase):
             except self.client.exceptions.AccessDeniedException:
                 logger.debug(f'No quicksight:DescribeDataSet permission or missing DataSetId {id}')
                 return None
+            except self.client.exceptions.ClientError as exc:
+                logger.error(f'Error when trying to describe dataset {id}: {exc}')
+                return None
 
         return self._datasets.get(id, None)
+
+    def get_dataset_last_ingestion(self, dataset_id) -> str:
+        """returns human friendly status of the latest ingestion"""
+        try:
+            ingestions = self.client.list_ingestions(
+                DataSetId=dataset_id,
+                AwsAccountId=self.account_id,
+            ).get('Ingestions', [])
+        except self.client.exceptions.ResourceNotFoundException:
+            return '<RED>NotFound<END>'
+        except self.client.exceptions.AccessDeniedException:
+            return '<YELLOW>AccessDenied<END>'
+        if not ingestions:
+            return None
+        last_ingestion = ingestions[0] # Suppose it is the latest
+        status = last_ingestion.get('IngestionStatus')
+        time_ago = ago(last_ingestion.get('CreatedTime'))
+        if last_ingestion.get('ErrorInfo', {}).get('Type') == "DATA_SET_NOT_SPICE":
+            return '<BLUE>DIRECT_QUERY<END>'
+        if status in ('COMPLETED',):
+            status = f'<GREEN>{status}<END>'
+            time_in_mins = int(int(last_ingestion.get('IngestionTimeInSeconds', 0) or 0) / 60)
+            return f"{status} ({time_in_mins} mins, {last_ingestion['RowInfo']['RowsIngested']} rows) {time_ago}"
+        if status in ('FAILED', 'CANCELLED'):
+            status = f'<RED>{status}<END>'
+            return f"{status} ({last_ingestion['ErrorInfo']['Type']} {last_ingestion['ErrorInfo']['Message']}) {time_ago}"
+        return f'{status} {time_ago}'
 
     def discover_datasets(self, _datasets: list=None):
         """ Discover datasets in the account """
@@ -901,15 +963,38 @@ class QuickSight(CidBase):
             for dataset in self.list_data_sets():
                 try:
                     self.describe_dataset(dataset.get('DataSetId'))
-                except Exception as e:
-                    logger.debug(e, exc_info=True)
+                except Exception as exc:
+                    logger.debug(exc, exc_info=True)
                     continue
         except self.client.exceptions.AccessDeniedException:
             logger.info('Access denied listing datasets')
-        except Exception as e:
-            logger.debug(e, exc_info=True)
+        except Exception as exc:
+            logger.debug(exc, exc_info=True)
             logger.info('No datasets found')
 
+    def refresh_dataset(self, dataset_id):
+        """ Refresh the dataset """
+
+        logger.info(f'Starting refresh for dataset: {dataset_id}')
+        status = 'FAILED'
+        try:
+            response = self.client.describe_data_set(
+                AwsAccountId=self.account_id,
+                DataSetId=dataset_id)
+            mode = response.get('DataSet').get('ImportMode')
+            if mode == 'DIRECT_QUERY':
+                return mode, 'DIRECT'
+            response = self.client.create_ingestion(
+                DataSetId=dataset_id,
+                IngestionId=datetime.datetime.now().strftime("%d%m%y-%H%M%S-%f"),
+                AwsAccountId=self.account_id)
+            status = response.get('IngestionStatus')
+        except self.client.exceptions.AccessDeniedException:
+            logger.error(f'Access denied refreshing dataset: {dataset_id}')
+        except Exception as exc:
+            logger.debug(exc, exc_info=True)
+            raise CidError(f'Unable to list refresh dataset {dataset_id}: {str(exc)}') from exc
+        return mode, status
 
     def describe_data_source(self, id: str, update: bool=False) -> Datasource:
         """ Describes an AWS QuickSight DataSource """
@@ -928,9 +1013,9 @@ class QuickSight(CidBase):
         except self.client.exceptions.AccessDeniedException:
             logger.info(f'No quicksight:DescribeDataSource permission or missing DataSetId {id}')
             raise
-        except Exception as e:
-            logger.info(e)
-            logger.debug(e, exc_info=True)
+        except Exception as exc:
+            logger.info(exc)
+            logger.debug(exc, exc_info=True)
             return None
         else:
             return _datasource
@@ -947,17 +1032,18 @@ class QuickSight(CidBase):
                     'AwsAccountId': account_id,
                     'TemplateId': template_id
                 }
-                if version_number: parameters.update({'VersionNumber': version_number})
+                if version_number:
+                    parameters.update({'VersionNumber': version_number})
                 result = client.describe_template(**parameters)
                 self._templates.update({f'{account_id}:{region}:{template_id}:{version_number}': CidQsTemplate(result.get('Template'))})
                 logger.debug(result)
-            except self.client.exceptions.UnsupportedUserEditionException:
-                raise CidCritical('AWS QuickSight Enterprise Edition is required')
-            except self.client.exceptions.ResourceNotFoundException:
-                raise CidError(f'Error: Template {template_id} is not available in account {account_id} and region {region}')
-            except Exception as e:
-                logger.debug(e, exc_info=True)
-                raise CidError(f'Error: {e} - Cannot find {template_id} in account {account_id}.')
+            except self.client.exceptions.UnsupportedUserEditionException as exc:
+                raise CidCritical('AWS QuickSight Enterprise Edition is required') from exc
+            except self.client.exceptions.ResourceNotFoundException as exc:
+                raise CidError(f'Error: Template {template_id} is not available in account {account_id} and region {region}') from exc
+            except Exception as exc:
+                logger.debug(exc, exc_info=True)
+                raise CidError(f'Error: {exc} - Cannot find {template_id} in account {account_id}.') from exc
         return self._templates.get(f'{account_id}:{region}:{template_id}:{version_number}')
 
     def describe_user(self, username: str) -> dict:
@@ -992,14 +1078,13 @@ class QuickSight(CidBase):
                 'GroupName': groupname,
                 'Namespace': 'default'
             })
-            logger.debug('group = ',json.dumps(result))
+            logger.debug('group = %s', json.dumps(result))
             return result.get('Group')
         except self.client.exceptions.ResourceNotFoundException:
             logger.error(f'QuickSight group {groupname} not found.')
             return None
-        except self.client.exceptions.AccessDeniedException: # Try to overcome AccessDeniedException
-            #FIXME: paginator is not available for list_groups
-            logger.error(f'AccessDeniedException when trying to DescribeGroup in QuickSight.')
+        except self.client.exceptions.AccessDeniedException:
+            logger.error('AccessDeniedException when trying to DescribeGroup in QuickSight.')
             return None
 
 
@@ -1012,7 +1097,7 @@ class QuickSight(CidBase):
         }
         data_set_permissions_tpl = Template(resource_string(
             package_or_requirement='cid.builtin.core',
-            resource_name=f'data/permissions/data_set_permissions.json',
+            resource_name='data/permissions/data_set_permissions.json',
         ).decode('utf-8'))
         data_set_permissions = json.loads(data_set_permissions_tpl.safe_substitute(columns_tpl))
         definition.update({
@@ -1030,8 +1115,8 @@ class QuickSight(CidBase):
         except self.client.exceptions.ResourceExistsException:
             dataset_id = definition.get("DataSetId")
             logger.info(f'Dataset {definition.get("Name")} already exists with DataSetId={dataset_id}')
-        except self.client.exceptions.LimitExceededException:
-            raise CidCritical('AWS QuickSight SPICE limit exceeded. Add SPICE here https://quicksight.aws.amazon.com/sn/admin#capacity .')
+        except self.client.exceptions.LimitExceededException as exc:
+            raise CidCritical('AWS QuickSight SPICE limit exceeded. Add SPICE here https://quicksight.aws.amazon.com/sn/admin#capacity .') from exc
 
         logger.info(f'Waiting for {definition.get("Name")} to be created')
         deadline = time.time() + max_timeout
@@ -1072,9 +1157,9 @@ class QuickSight(CidBase):
             )
             return refresh_schedules.get("RefreshSchedules")
         except self.client.exceptions.ResourceNotFoundException as exc:
-            raise CidError(f'DataSource {dataset_id} does not exist') from exc
+            raise CidError(f'DataSet {dataset_id} does not exist') from exc
         except self.client.exceptions.AccessDeniedException as exc:
-            raise CidError(f'No quicksight:ListDataSets permission') from exc
+            raise CidError('AccessDenied on ListRefreshSchedules') from exc
         except Exception as exc:
             raise CidError(f'Unable to list refresh schedules for dataset {dataset_id}: {str(exc)}') from exc
 
@@ -1085,12 +1170,27 @@ class QuickSight(CidBase):
         try:
             existing_schedules = self.get_dataset_refresh_schedules(dataset_id)
         except CidError as exc:
-            logger.debug(exc, exc_info=True)
-            logger.warning(
-                f'Cannot read dataset schedules for dataset = {dataset_id}. {str(exc)}. Skipping schedule management.'
-                ' Please make sure scheduled refresh is configured manualy.'
-            )
-            return
+            # We cannot access schedules, but let's check if there are scheduled ingestions. 
+            ingestions_exist = False
+            try:
+                ingestions_exist = list(
+                    self.client.get_paginator('list_ingestions').paginate(
+                        DataSetId=dataset_id,
+                        AwsAccountId=self.account_id
+                    ).search("Ingestions[?RequestSource=='SCHEDULED']")
+                )
+            except Exception:
+                logger.debug(f'List refresh schedule throws: {exc}')
+                logger.warning(
+                    f'Cannot read dataset schedules for dataset = {dataset_id}. {str(exc)}. Skipping schedule management.'
+                    ' Please make sure scheduled refresh is configured manually.'
+                )
+                return
+            if ingestions_exist:
+                logger.debug(f'We cannot read schedules but there are ingestions. Skipping creation of schedule.')
+                return
+            logger.debug(f'We cannot read schedules but there no ingestions. Continue to creation of schedule.')
+            existing_schedules = []
 
         if schedules:
             if exec_env()['terminal'] in ('lambda'):
@@ -1103,12 +1203,12 @@ class QuickSight(CidBase):
                     default=default_timezone
                 )
             if not schedule_frequency_timezone:
-                logger.warning(f'Cannot get timezone. Please provide --timezone parameter. Please make sure scheduled refresh is configured manualy.')
+                logger.warning('Cannot get timezone. Please provide --timezone parameter. Please make sure scheduled refresh is configured manually.')
                 return
 
         for schedule in schedules:
 
-            # Get the list of exising schedules with the same id
+            # Get the list of existing schedules with the same id
             existing_schedule = None
             for existing in existing_schedules:
                 if schedule["ScheduleId"] == existing["ScheduleId"]:
@@ -1122,7 +1222,7 @@ class QuickSight(CidBase):
             schedule["ScheduleFrequency"]["Timezone"] = schedule_frequency_timezone
             try:
                 schedule["ScheduleFrequency"]["TimeOfTheDay"] = randtime.get_random_time_from_range(
-                    self.account_id + dataset_id, 
+                    self.account_id + dataset_id,
                     schedule["ScheduleFrequency"].get("TimeOfTheDay", "")
                 )
             except Exception as exc:
@@ -1158,9 +1258,11 @@ class QuickSight(CidBase):
                     logger.error(f'Unable to create refresh schedule with id {schedule["ScheduleId"]}. Dataset {dataset_id} does not exist.')
                 except self.client.exceptions.AccessDeniedException:
                     logger.error(f'Unable to create refresh schedule with id {schedule["ScheduleId"]}. Please add quicksight:CreateDataSet permission.')
+                except self.client.exceptions.ResourceExistsException:
+                    logger.info(f'Schedule with id {schedule["ScheduleId"]} exists. But can have other settings. You better check.')
                 except Exception as exc:
                     logger.error(f'Unable to create refresh schedule with id {schedule["ScheduleId"]} for dataset "{dataset_id}": {str(exc)}')
-            else: 
+            else:
                 # schedule exists so we need to update
                 logger.debug(f'Updating refresh schedule with id {schedule["ScheduleId"]} for dataset {dataset_id}.')
                 try:
@@ -1187,11 +1289,11 @@ class QuickSight(CidBase):
     def create_dashboard(self, definition: dict) -> Dashboard:
         """ Creates an AWS QuickSight dashboard """
 
-        create_parameters = self._buid_params_for_create_update_dash(definition)
+        create_parameters = self._build_params_for_create_update_dash(definition)
 
         dashboard_permissions_tpl = Template(resource_string(
             package_or_requirement='cid.builtin.core',
-            resource_name=f'data/permissions/dashboard_permissions.json',
+            resource_name='data/permissions/dashboard_permissions.json',
         ).decode('utf-8'))
         columns_tpl = {
             'PrincipalArn': self.get_principal_arn()
@@ -1223,13 +1325,21 @@ class QuickSight(CidBase):
         return dashboard
 
 
-    def _buid_params_for_create_update_dash(self, definition: dict, permissions: bool=True) -> Dict:
+    def _build_params_for_create_update_dash(self, definition: dict, permissions: bool=True) -> Dict:
 
         create_parameters = {
             'AwsAccountId': self.account_id,
             'DashboardId': definition.get('dashboardId'),
             'Name': definition.get('name'),
+            'ValidationStrategy': {'Mode': 'LENIENT'},
         }
+        theme = definition.get('theme')
+        if theme:
+            if not theme.startswith('arn:'):
+                theme_arn = 'arn:aws:quicksight::aws:theme/' + theme
+            else:
+                raise NotImplementedError('Only standard themes are supported now.')
+            create_parameters['ThemeArn'] = theme_arn
 
         if definition.get('sourceTemplate'):
             dataset_references = [
@@ -1247,8 +1357,8 @@ class QuickSight(CidBase):
             dataset_references = []
             for identifier, arn in definition.get('datasets', {}).items():
                 # Fetch dataset by name (preferably) OR by id
-                dastaset_declarations = create_parameters['Definition'].get('DataSetIdentifierDeclarations', [])
-                for ds_dec in dastaset_declarations:
+                dataset_declarations = create_parameters['Definition'].get('DataSetIdentifierDeclarations', [])
+                for ds_dec in dataset_declarations:
                     if identifier == ds_dec['Identifier']:
                         logger.debug('Dataset {identifier} matched by Name')
                         break # all good
@@ -1257,20 +1367,20 @@ class QuickSight(CidBase):
                         identifier = ds_dec['Identifier']
                         break
                 else:
-                    raise CidCritical(f'Unable to match dataset {identifier} / {arn} with any DataSetIdentifierDeclarations of dashboard {repr(dastaset_declarations)}')
+                    raise CidCritical(f'Unable to match dataset {identifier} / {arn} with any DataSetIdentifierDeclarations of dashboard {repr(dataset_declarations)}')
 
                 dataset_references.append({'Identifier': identifier, 'DataSetArn': arn})
 
             create_parameters['SourceEntity'] = {}
             create_parameters['Definition']['DataSetIdentifierDeclarations'] = dataset_references
         else:
-            logger.debug(f'Defintion = {definition}')
+            logger.debug(f'Definition = {definition}')
             raise CidCritical('Dashboard definition must contain sourceTemplate or definition')
         return create_parameters
 
     def update_dashboard(self, dashboard: Dashboard, definition):
         """ Updates an AWS QuickSight dashboard """
-        update_parameters = self._buid_params_for_create_update_dash(definition)
+        update_parameters = self._build_params_for_create_update_dash(definition)
         logger.info(f'Updating dashboard "{dashboard.name}"')
         logger.debug(f"Update parameters: {update_parameters}")
         update_status = self.client.update_dashboard(**update_parameters)
@@ -1329,6 +1439,10 @@ class QuickSight(CidBase):
         update_status = self.client.update_template_permissions(**update_parameters)
         logger.debug(update_status)
         return update_status
+
+    def get_dashboard_permissions(self, dashboard_id):
+        """ get_dashboard_permissions """
+        return self.client.describe_dashboard_permissions(AwsAccountId=self.account_id, DashboardId=dashboard_id)['Permissions']
 
     def dataset_diff(self, raw1, raw2):
         """ get dataset diff """

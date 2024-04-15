@@ -22,6 +22,12 @@ class CidBase():
         return self.awsIdentity.get('Account')
 
     @property
+    def domain(self) -> str:
+        if self.region.startswith('cn-'):
+            return 'amazonaws.cn'
+        return 'aws.amazon.com'
+
+    @property
     def awsIdentity(self) -> dict:
         if not self._awsIdentity:
             try:
@@ -42,6 +48,10 @@ class CidBase():
     @property
     def region_name(self) -> str:
         return self.session.region_name
+
+    @property
+    def partition(self) -> str:
+        return self.session.get_partition_for_region(region_name=self.region_name)
 
     @property
     def session(self) -> Session:
