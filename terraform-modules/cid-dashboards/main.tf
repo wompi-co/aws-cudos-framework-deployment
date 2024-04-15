@@ -6,7 +6,7 @@ resource "aws_s3_object" "template" {
   bucket                 = data.aws_s3_bucket.template_bucket.bucket
   key                    = var.template_key
   source                 = "${path.module}/../../cfn-templates/cid-cfn.yml"
-  etag                   = filemd5("${path.module}/../../cfn-templates/cid-cfn.yml")
+  source_hash            = filemd5("${path.module}/../../cfn-templates/cid-cfn.yml")
   server_side_encryption = "AES256"
 }
 
