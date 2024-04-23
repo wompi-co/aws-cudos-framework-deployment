@@ -1,31 +1,28 @@
 import os
 import sys
 import json
+import urllib
 import logging
 import functools
 from pathlib import Path
 from string import Template
 from typing import Dict
 from pkg_resources import resource_string
-
-if sys.version_info < (3, 8):
-    from importlib_metadata import entry_points
-else:
-    from importlib.metadata import entry_points
+from importlib.metadata import entry_points
+from functools import cached_property
 
 import yaml
 import click
 import requests
-from deepmerge import always_merger
 from botocore.exceptions import ClientError, NoCredentialsError, CredentialRetrievalError
 
 
 from cid import utils
 from cid.base import CidBase
 from cid.plugin import Plugin
-from cid.utils import get_parameter, get_parameters, set_parameters, unset_parameter, get_yesno_parameter, cid_print, isatty
+from cid.utils import get_parameter, get_parameters, set_parameters, unset_parameter, get_yesno_parameter, cid_print, isatty, merge_objects, IsolatedParameters
 from cid.helpers.account_map import AccountMap
-from cid.helpers import Athena, CUR, Glue, QuickSight, Dashboard, Dataset, Datasource, csv2view, Organizations
+from cid.helpers import Athena, S3, IAM, CUR, Glue, QuickSight, Dashboard, Dataset, Datasource, csv2view, Organizations
 from cid.helpers.quicksight.template import Template as CidQsTemplate
 from cid._version import __version__
 from cid.export import export_analysis
@@ -45,11 +42,14 @@ class Cid():
         self.plugins = self.__loadPlugins()
         self._clients = dict()
         self._visited_views = [] # Views updated in the current session
-        self.qs_url = 'https://{region}.quicksight.aws.amazon.com/sn/dashboards/{dashboard_id}'
+        self.qs_url = 'https://{region}.quicksight.{domain}/sn/dashboards/{dashboard_id}'
         self.all_yes = kwargs.get('yes')
         self.verbose = kwargs.get('verbose')
         set_parameters(kwargs, self.all_yes)
         self._logger = None
+        self.catalog_urls = [
+            'https://raw.githubusercontent.com/aws-samples/aws-cudos-framework-deployment/main/dashboards/catalog.yaml',
+        ]
 
     def aws_login(self):
         params = {
@@ -72,7 +72,8 @@ class Cid():
                 logger.info(f'AWS profile name: {self.base.session.profile_name}')
             self.qs_url_params = {
                 'account_id': self.base.account_id,
-                'region': self.base.session.region_name
+                'region': self.base.session.region_name,
+                'domain': self.base.domain,
             }
         except (NoCredentialsError, CredentialRetrievalError):
             raise CidCritical('Error: Not authenticated, please check AWS credentials')
@@ -85,59 +86,54 @@ class Cid():
         logger.info(f'AWS region: {self.base.session.region_name}')
         print('\n')
 
-    @property
+    @cached_property
     def qs(self) -> QuickSight:
-        if not self._clients.get('quicksight'):
-            self._clients.update({
-                'quicksight': QuickSight(self.base.session, resources=self.resources)
-            })
-        return self._clients.get('quicksight')
+        return QuickSight(self.base.session, resources=self.resources)
 
-    @property
+    @cached_property
     def athena(self) -> Athena:
-        if not self._clients.get('athena'):
-            self._clients.update({
-                'athena': Athena(self.base.session, resources=self.resources)
-            })
-        return self._clients.get('athena')
+        return Athena(self.base.session, resources=self.resources)
 
-    @property
+    @cached_property
     def glue(self) -> Glue:
-        if not self._clients.get('glue'):
-            self._clients.update({
-                'glue': Glue(self.base.session)
-            })
-        return self._clients.get('glue')
-    
-    @property
+        return Glue(self.base.session)
+
+    @cached_property
+    def iam(self) -> IAM:
+        return IAM(self.base.session)
+
+    @cached_property
     def organizations(self) -> Organizations:
-        if not self._clients.get('organizations'):
-            self._clients.update({
-                'organizations': Organizations(self.base.session)
-            })
-        return self._clients.get('organizations')
+        return Organizations(self.base.session)
+
+    @cached_property
+    def s3(self) -> S3:
+        return S3(self.base.session)
 
     @property
     def cur(self) -> CUR:
         if not self._clients.get('cur'):
-            _cur = CUR(self.base.session)
-            _cur.athena = self.athena
-            print('Checking if CUR is enabled and available...')
+            while True:
+                try:
+                    _cur = CUR(self.athena, self.glue)
+                    print('Checking if CUR is enabled and available...')
 
-            if not _cur.configured:
-                raise CidCritical("Error: please ensure CUR is enabled, if yes allow it some time to propagate")
+                    if not _cur.metadata:
+                        raise CidCritical("Error: please ensure CUR is enabled, if yes allow it some time to propagate")
 
-            print(f'\tAthena table: {_cur.tableName}')
-            print(f"\tResource IDs: {'yes' if _cur.hasResourceIDs else 'no'}")
-            if not _cur.hasResourceIDs:
-                raise CidCritical("Error: CUR has to be created with Resource IDs")
-            print(f"\tSavingsPlans: {'yes' if _cur.hasSavingsPlans else 'no'}")
-            print(f"\tReserved Instances: {'yes' if _cur.hasReservations else 'no'}")
-            print('\n')
-            self._clients.update({
-                'cur': _cur
-            })
-        return self._clients.get('cur')
+                    cid_print(f'\tAthena table: {_cur.table_name}')
+                    cid_print(f"\tResource IDs: {'yes' if _cur.has_resource_ids else 'no'}")
+                    if not _cur.has_resource_ids:
+                        raise CidCritical("Error: CUR has to be created with Resource IDs")
+                    cid_print(f"\tSavingsPlans: {'yes' if _cur.has_savings_plans else 'no'}")
+                    cid_print(f"\tReserved Instances: {'yes' if _cur.has_reservations else 'no'}")
+                    cid_print('\n')
+                    self._clients['cur'] = _cur
+                    break
+                except CidCritical as exc:
+                    cid_print(f'CUR not found in {self.athena.DatabaseName}. If you have S3 bucket with CUR in this account you can create a CUR table with Crawler.')
+                    self.create_cur_table()
+        return self._clients['cur']
 
     @property
     def accountMap(self) -> AccountMap:
@@ -191,10 +187,12 @@ class Cid():
             print(f"\t{ep.name} loaded")
             plugins.update({ep.value: plugin})
             try:
-                self.resources = always_merger.merge(
-                    self.resources, plugin.provides())
+                resources = plugin.provides()
+                if ep.value != 'cid.builtin.core':
+                    resources.get('views', {}).pop('account_map', None) # protect account_map from overriding
+                self.resources = merge_objects(self.resources, resources, depth=1)
             except AttributeError:
-                pass
+                logger.warning(f'Failed to load {ep.name}')
         print('\n')
         logger.info('Finished loading plugins')
         return plugins
@@ -228,9 +226,9 @@ class Cid():
         :noparams: do not process parameters as they may not exist by this time
         """
         res = None
-        if type not in ['dashboard', 'dataset', 'view', 'schedule']:
+        if type not in ['dashboard', 'dataset', 'view', 'schedule', 'crawler']:
             raise ValueError(f'{type} is not a valid definition type')
-        if type in ['dataset', 'view', 'schedule'] and name:
+        if type in ['dataset', 'view', 'schedule', 'crawler'] and name:
             res = self.resources.get(f'{type}s').get(name)
         elif type in ['dashboard']:
             for definition in self.resources.get(f'{type}s').values():
@@ -254,7 +252,7 @@ class Cid():
 
     @command
     def export(self, **kwargs):
-        export_analysis(self.qs, self.athena)
+        export_analysis(self.qs, self.athena, glue=self.glue)
 
     def track(self, action, dashboard_id):
         """ Send dashboard_id and account_id to adoption tracker """
@@ -280,26 +278,54 @@ class Cid():
         except Exception as e:
             logger.debug(f"Issue logging action {action}  for dashboard {dashboard_id} , due to a urllib3 exception {str(e)} . This issue will be ignored")
 
+    def get_page(self, source):
+        resp = requests.get(source, timeout=10)
+        resp.raise_for_status()
+        return resp
 
     def load_resources(self):
         ''' load additional resources from command line parameters
         '''
+        if get_parameters().get('catalog'):
+            self.catalog_urls = get_parameters().get('catalog').split(',')
+        for catalog_url in self.catalog_urls:
+            self.load_catalog(catalog_url)
         if get_parameters().get('resources'):
             source = get_parameters().get('resources')
-            logger.info(f'Loading resources from {source}')
-            resources = {}
-            try:
-                if source.startswith('https://'):
-                    resp = requests.get(source, timeout=10)
-                    assert resp.status_code in [200, 201], f'Error {resp.status_code} while loading url. {resp.text}'
-                    resources = yaml.safe_load(resp.text)
-                else:
-                    with open(source, encoding='utf-8') as file_:
-                        resources = yaml.safe_load(file_)
-            except Exception as exc:
-                raise CidCritical(f'Failed to load resources from {source}: {type(exc)} {exc}')
-            self.resources = always_merger.merge(self.resources, resources)
+            self.load_resource_file(source)
         self.resources = self.resources_with_global_parameters(self.resources)
+
+    def load_resource_file(self, source):
+        ''' load additional resources from resource file
+        '''
+        logger.debug(f'Loading resources from {source}')
+        resources = {}
+        try:
+            if source.startswith('https://'):
+                resources = yaml.safe_load(self.get_page(source).text)
+                if not isinstance(resources, dict):
+                    raise CidCritical(f'Failed to load {source}. Got {type(resources)} ({repr(resources)[:150]}...)')
+            else:
+                with open(source, encoding='utf-8') as file_:
+                    resources = yaml.safe_load(file_)
+        except Exception as exc:
+            logger.warning(f'Failed to load resources from {source}: {exc}')
+            return
+        resources.get('views', {}).pop('account_map', None) # Exclude account map as it is a special view
+        self.resources = merge_objects(self.resources, resources, depth=1)
+
+    def load_catalog(self, catalog_url):
+        ''' load additional resources from catalog
+        '''
+        try:
+            catalog = yaml.safe_load(self.get_page(catalog_url).text)
+        except (requests.exceptions.RequestException, yaml.error.MarkedYAMLError) as exc:
+            logger.warning(f'Failed to load a catalog url: {exc}')
+            logger.debug(exc, exc_info=True)
+            return
+        for resource_ref in catalog.get('Resources', []):
+            url = urllib.parse.urljoin(catalog_url, resource_ref.get("Url"))
+            self.load_resource_file(url)
 
 
     def get_template_parameters(self, parameters: dict, param_prefix: str='', others: dict=None):
@@ -341,7 +367,7 @@ class Cid():
                         )
             else:
                 raise CidCritical(f'Unknown parameter type for "{key}". Must be a string or a dict with value or with default key')
-        return always_merger.merge(params, others or {})
+        return merge_objects(params, others or {}, depth=1)
 
 
     @command
@@ -350,25 +376,61 @@ class Cid():
         self._deploy(dashboard_id, recursive, update, **kwargs)
 
 
+    def ensure_subscription(self):
+        for _ in range(3):
+            try:
+                return self.qs.ensure_subscription()
+            except CidCritical as exc:
+                if 'QuickSight is not activated' in str(exc):
+                    self.init_qs()
+                    unset_parameter('enable-quicksight-enterprise') # in case if customer answered no
+                else:
+                    raise
+        else:
+            raise CidCritical('QuickSight is not activated. Please open https://quicksight.aws.amazon.com/ and activate ENTERPRISE subscription.')
+
     def _deploy(self, dashboard_id: str=None, recursive=True, update=False, **kwargs):
         """ Deploy Dashboard """
 
-        self.qs.ensure_subscription()
+        self.ensure_subscription()
 
         # In case if we cannot discover datasets, we need to discover dashboards
         # TODO: check if datasets returns explicit permission denied and only then discover dashboards as a workaround
         self.qs.discover_dashboards()
 
+        dashboard_id = dashboard_id or get_parameters().get('dashboard-id')
+        category_filter = [cat for cat in get_parameters().get('category', '').upper().split(',') if cat]
+        if not dashboard_id:
+            standard_categories = ['Foundational', 'Advanced', 'Additional'] # Show these categories first
+            all_categories = set([f"{dashboard.get('category', 'Other')}" for dashboard in self.resources.get('dashboards').values()])
+            non_standard_categories = [cat for cat in all_categories if cat not in standard_categories]
+            categories =  standard_categories + sorted(non_standard_categories)
+            dashboard_options = {}
+            for category in categories:
+                if category_filter and category.upper() not in category_filter:
+                    continue
+                dashboard_options[f'{category.upper()}'] = '[category]'
+                counter = 0
+                for dashboard in self.resources.get('dashboards').values():
+                    if dashboard.get('deprecationNotice'):
+                        continue
+                    if dashboard.get('category', 'Other') == category:
+                        check = '✓' if dashboard.get('dashboardId') in self.qs.dashboards else ' '
+                        dashboard_options[f" {check}[{dashboard.get('dashboardId')}] {dashboard.get('name')}"] = dashboard.get('dashboardId')
+                        counter += 1
+                if not counter: # remove empty categories
+                    del dashboard_options[f'{category.upper()}']
+            while True:
+                dashboard_id = get_parameter(
+                    param_name='dashboard-id',
+                    message="Please select a dashboard to deploy",
+                    choices=dashboard_options,
+                )
+                if dashboard_id == '[category]':
+                    unset_parameter('dashboard-id')
+                    continue
+                break
 
-        if dashboard_id is None:
-            dashboard_id = get_parameter(
-                param_name='dashboard-id',
-                message="Please select dashboard to install",
-                choices={
-                   f"[{dashboard.get('dashboardId')}] {dashboard.get('name')}" : dashboard.get('dashboardId')
-                   for k, dashboard in self.resources.get('dashboards').items()
-                },
-            )
         if not dashboard_id:
             print('No dashboard selected')
             return
@@ -379,8 +441,8 @@ class Cid():
         try:
             dashboard = self.qs.discover_dashboard(dashboardId=dashboard_id)
         except CidCritical:
-            pass 
-        
+            pass
+
         if not dashboard_definition:
             if isinstance(dashboard, Dashboard):
                 dashboard_definition = dashboard.definition
@@ -434,19 +496,24 @@ class Cid():
                 choices=['yes', 'no'],
                 default='yes') != 'yes':
                 return
-            logger.info("Swich to recursive mode")
+            logger.info("Switch to recursive mode")
             recursive = True
 
         if recursive:
             self.create_datasets(required_datasets_names, dashboard_datasets, recursive=recursive, update=update)
 
-        # Find datasets for template or defintion
+        # Find datasets for template or definition
         if not dashboard_definition.get('datasets'):
             dashboard_definition['datasets'] = {}
 
         for dataset_name in required_datasets_names:
+            dataset = None
             # First try to find the dataset with the id
-            dataset = self.qs.describe_dataset(id=dataset_name)
+            try:
+                dataset = self.qs.describe_dataset(id=dataset_name)
+            except Exception as exc:
+                logger.debug(f'Failed to describe_dataset {dataset_name} {exc}')
+
             if isinstance(dataset, Dataset):
                 logger.debug(f'Found dataset {dataset_name} with id match = {dataset.arn}')
                 dashboard_definition['datasets'][dataset_name] = dataset.arn
@@ -460,21 +527,21 @@ class Cid():
                     if not isinstance(ds, Dataset) or ds.name != dataset_name:
                         continue
                     if dashboard_definition.get('templateId'):
-                        # For templates we can additionaly verify dataset fields
+                        # For templates we can additionally verify dataset fields
                         dataset_fields = {col.get('Name'): col.get('Type') for col in ds.columns}
                         src_fields = source_template.datasets.get(ds_map.get(dataset_name, dataset_name) )
-                        required_fileds = {col.get('Name'): col.get('DataType') for col in src_fields}
+                        required_fields = {col.get('Name'): col.get('DataType') for col in src_fields}
                         unmatched = {}
-                        for k, v in required_fileds.items():
-                            if k not in dataset_fields or dataset_fields[k] != v:
-                                unmatched.update({k: {'expected': v, 'found': dataset_fields.get(k)}})
+                        for field_name, field_type in required_fields.items():
+                            if field_name not in dataset_fields or dataset_fields[field_name] != field_type:
+                                unmatched.update({field_name: {'expected': field_type, 'found': dataset_fields.get(field_name)}})
                         logger.debug(f'unmatched_fields={unmatched}')
                         if unmatched:
                             logger.warning(f'Found Dataset "{dataset_name}" ({ds.id}) but it is missing required fields. {(unmatched)}')
                         else:
                             matching_datasets.append(ds)
                     else:
-                        # for definitions datasets we do not have any possibilty to check if dataset with a given name matches
+                        # for definitions datasets we do not have any possibility to check if dataset with a given name matches
                         matching_datasets.append(ds)
 
                 if not matching_datasets:
@@ -568,24 +635,63 @@ class Cid():
     @command
     def status(self, dashboard_id, **kwargs):
         """Check QuickSight dashboard status"""
-
-        if not dashboard_id:
-            if not self.qs.dashboards:
-                print('No deployed dashboards found')
-                return
-            dashboard_id = self.qs.select_dashboard(force=True)
+        next_selection = None
+        while next_selection != 'exit':
             if not dashboard_id:
-                print('No dashboard selected')
-                return
-            dashboard = self.qs.discover_dashboard(dashboardId=dashboard_id)
-        else:
+                if not self.qs.dashboards:
+                    print('No deployed dashboards found')
+                    return
+                dashboard_id = self.qs.select_dashboard(force=True)
+                if not dashboard_id:
+                    print('No dashboard selected')
+                    return
             dashboard = self.qs.discover_dashboard(dashboardId=dashboard_id)
 
-        if dashboard is not None:
-            dashboard.display_status()
-            dashboard.display_url(self.qs_url, **self.qs_url_params)
-        else:
-            click.echo('not deployed.')
+            if dashboard is not None:
+                dashboard.display_status()
+                dashboard.display_url(self.qs_url, **self.qs_url_params)
+                with IsolatedParameters():
+                    next_selection = get_parameter(
+                        param_name=f'{dashboard.id}',
+                        message="Please make a selection",
+                        choices={
+                            '[◀] Back': 'back',
+                            '[↗] Open': 'open',
+                            '[◴] Refresh datasets': 'refresh',
+                            '[↺] Update dashboard': 'update',
+                            '[✕] Exit': 'exit',
+                        }
+                    )
+                    if next_selection == 'open':
+                        self.open(dashboard.id, **kwargs)
+
+                    elif next_selection == 'refresh':
+                        dashboard.refresh_datasets()
+
+                    elif next_selection == 'update':
+                        if dashboard.latest:
+                            if not get_yesno_parameter(
+                                    param_name=f'redeploy-{dashboard.id}',
+                                    message=f'\nThe selected dashboard {dashboard.id} is already on the latest version.\nDo you want to re-deploy it?',
+                                    default='no'):
+                                logger.info(f'Not re-deploying {dashboard.id} as it is on latest version.\n')
+                                continue
+                        recursive = get_parameter(
+                            param_name='recursive',
+                            message=f'\nRecursive update the Datasets and Views in addition to the Dashboard update?\nATTENTION: This could lead to the loss of dataset customization.\nRecursive update?',
+                            choices={
+                                '[→] Simple Update (only dashboard)': 'simple',
+                                '[⇶] Recursive Update (dashboard and all dependencies)': 'recursive',
+                            }
+                        ) == 'recursive'
+                        logger.info(f'Updating dashboard: {dashboard.id} with Recursive = {recursive}')
+                        self._deploy(dashboard_id, recursive=recursive, update=True)
+                        logger.info('Rediscover dashboards after update')
+                        self.qs.discover_dashboards()
+                self.qs.clear_dashboard_selection()
+                dashboard_id = None
+            else:
+                cid_print('not deployed.')
 
     @command
     def delete(self, dashboard_id, **kwargs):
@@ -607,7 +713,7 @@ class Cid():
 
         try:
             # Execute query
-            click.echo('Deleting dashboard...', nl=False)
+            print('Deleting dashboard')
             self.qs.delete_dashboard(dashboard_id=dashboard_id)
             print(f'Dashboard {dashboard_id} deleted')
             self.track('deleted', dashboard_id)
@@ -816,10 +922,11 @@ class Cid():
             print(f'Sharing complete')
         elif share_method in ['account', 'user']:
             if share_method == 'account':
-                principal_arn = f"arn:aws:quicksight:{self.qs.identityRegion}:{self.qs.account_id}:namespace/default"
+                principal_arn = f"arn:{self.base.partition}:quicksight:{self.qs.identityRegion}:{self.qs.account_id}:namespace/default"
                 template_filename = 'data/permissions/dashboard_permissions_namespace.json'
             elif share_method == 'user':
                 template_filename = 'data/permissions/dashboard_permissions.json'
+                print('Fetching QuickSight users. Duration will scale with the number of users.')
                 user = self.qs.select_user()
                 while not user:
                     user_name = get_parameter(
@@ -916,10 +1023,7 @@ class Cid():
 
 
     def check_dashboard_version_compatibility(self, dashboard_id):
-        
-        """
-            Returns True | False | None if could not check 
-        """
+        """ Returns True | False | None if could not check """
         try:
             dashboard = self.qs.discover_dashboard(dashboardId=dashboard_id)
         except CidCritical:
@@ -927,14 +1031,14 @@ class Cid():
         if not dashboard:
             print(f'Dashboard "{dashboard_id}" is not deployed')
             return None
-        if not isinstance(dashboard.deployedTemplate, CidQsTemplate): 
+        if not isinstance(dashboard.deployedTemplate, CidQsTemplate):
             print(f'Dashboard "{dashboard_id}" does not have a versioned template')
             return None
         if not isinstance(dashboard.sourceTemplate, CidQsTemplate):
             print(f"Cannot access QuickSight source template for {dashboard_id}")
             return None
         try:
-            cid_version = dashboard.deployedTemplate.cid_version            
+            cid_version = dashboard.deployedTemplate.cid_version
         except ValueError:
             logger.debug("The cid version of the deployed dashboard could not be retrieved")
             cid_version = "N/A"
@@ -946,32 +1050,24 @@ class Cid():
             cid_version_latest = "N/A"
 
         if dashboard.latest:
-            print("You are up to date!")       
-            print(f"  CID Version      {cid_version}")
-            print(f"  TemplateVersion  {dashboard.deployed_version} ")
-
-            logger.debug("The dashboard is up-to-date")
-            logger.debug(f"CID Version      {cid_version}")
-            logger.debug(f"TemplateVersion  {dashboard.deployed_version} ")
+            cid_print("You are up to date!")
+            cid_print(f"  Version    {cid_version}")
+            cid_print(f"  VersionId  {dashboard.deployed_version} ")
         else:
-            print(f"An update is available:")
-            print("                   Deployed -> Latest")
-            print(f"  CID Version      {str(cid_version): <9}   {str(cid_version_latest): <6}")
-            print(f"  TemplateVersion  {str(dashboard.deployedTemplate.version): <9}   {dashboard.latest_version: <6}")
-
-            logger.debug("An update is available")
-            logger.debug(f"CID Version      {str(cid_version): <9} --> {str(cid_version_latest): <6}")
-            logger.debug(f"TemplateVersion  {str(dashboard.deployedTemplate.version): <9} -->  {dashboard.latest_version: <6}")
+            cid_print(f"An update is available:")
+            cid_print("              Deployed -> Latest")
+            cid_print(f"  Version    {str(cid_version): <9}   {str(cid_version_latest): <9}")
+            cid_print(f"  VersionId  {str(dashboard.deployedTemplate.version): <9}   {dashboard.latest_version: <9}")
 
         # Check if version are compatible
         compatible = None
         try:
             compatible = dashboard.sourceTemplate.cid_version.compatible_versions(dashboard.deployedTemplate.cid_version)
-        except ValueError as e:
-            logger.info(e)
-            
+        except ValueError as exc:
+            logger.info(exc)
+
         return compatible
-    
+
     def update_dashboard(self, dashboard_id, dashboard_definition):
 
         dashboard = self.qs.discover_dashboard(dashboardId=dashboard_id)
@@ -988,8 +1084,7 @@ class Cid():
             print(f"Latest template: {dashboard.sourceTemplate.arn}/version/{dashboard.latest_version}")
         else:
             print('Unable to determine dashboard source.')
-        
-                            
+
         if dashboard.status == 'legacy':
             if get_parameter(
                 param_name=f'confirm-update',
@@ -1008,7 +1103,7 @@ class Cid():
         # Update dashboard
         print(f'\nUpdating {dashboard_id}')
         logger.debug(f"Updating {dashboard_id}")
-        
+
         try:
             self.qs.update_dashboard(dashboard, dashboard_definition)
             print('Update completed\n')
@@ -1188,11 +1283,72 @@ class Cid():
             ).decode('utf-8')
             if file_name.endswith('.json') or file_name.endswith('.jsn'):
                 data = json.loads(text)
+            elif file_name.endswith('.yaml') or file_name.endswith('.yml'):
+                data = yaml.safe_load(text)
             else:
                 data = text
         if data is None:
             raise CidCritical(f"Error: definition is broken. Cannot find data for {repr(definition)}. Check resources file.")
         return data
+
+
+    def create_datasource(self, datasource_id) -> str:
+        """Create datasource with given id
+        uses parameters: 'quicksight-datasource-role-arn', 'quicksight-datasource-role'
+        """
+        role_arn = get_parameters().get('quicksight-datasource-role-arn')
+        if not role_arn:
+            role_name = get_parameters().get('quicksight-datasource-role')
+            if role_name:
+                role_arn = f'arn:aws:iam::{self.base.account_id}:role/{role_name}'
+
+        if not role_arn:
+            quicksight_trusted_roles = list(self.iam.iterate_role_names(search="Roles[?AssumeRolePolicyDocument.Statement[?Principal.Service=='quicksight.amazonaws.com']].RoleName"))
+            #quicksight_trusted_roles = [role for role in quicksight_trusted_roles if role not in ('aws-quicksight-secretsmanager-role-v0')] # filter out irrelevant roles
+            # TODO: filter only roles with Athena and S3 policies
+            cid_role_name = 'CidCmdQuickSightDataSourceRole'
+            choices = quicksight_trusted_roles
+            default = None
+            if cid_role_name not in choices:
+                choices.append(cid_role_name + ' <ADD NEW ROLE>' )
+                default = cid_role_name + ' <ADD NEW ROLE>'
+            else:
+                default = cid_role_name
+            choice = get_parameter(
+                'quicksight-datasource-role',
+                message='Please choose a QuickSight role. It must have access to Athena',
+                choices=['<USE DEFAULT QuickSight ROLE (You will need to login to QuickSight Security and Permissions management and configure S3 and Athena access there)>'] + choices,
+                default=default,
+            )
+            if "<ADD NEW ROLE>" in choice or choice == cid_role_name: # Create or update role
+                # TODO: allow customer add buckets
+                buckets = [
+                    f'cid-{self.base.account_id}-share',
+                    f'cid-data-{self.base.account_id}',
+                    f'costoptimizationdata{self.base.account_id}',
+                ]
+                role_name = self.iam.ensure_data_source_role_exists(
+                    role_name=cid_role_name,
+                    database=self.athena.DatabaseName,
+                    workgroup=self.athena.WorkGroup,
+                    buckets=buckets,
+                    output_location_bucket = self.athena.workgroup_output_location().split('/')[2],
+                )
+                cid_print(f'Role {role_name} was updated. https://console.aws.amazon.com/iam/home?#/roles/details/{role_name}')
+                role_arn = f'arn:aws:iam::{self.base.account_id}:role/{role_name}'
+            elif 'USE DEFAULT QuickSight ROLE' in choice:
+                role_arn = None
+            else:
+                role_arn = choice
+
+        athena_datasource = self.qs.create_data_source(
+            athena_workgroup=self.athena.WorkGroup,
+            datasource_id=datasource_id,
+            role_arn=role_arn,
+        )
+        print('athena_datasource', athena_datasource)
+        return athena_datasource
+
 
 
     def create_or_update_dataset(self, dataset_definition: dict, dataset_id: str=None,recursive: bool=True, update: bool=False) -> bool:
@@ -1203,99 +1359,85 @@ class Cid():
         athena_datasource = None
 
         # Manage datasource
-        # We must do it here. In case if dastasource is not defined by user, we can take it from dataset
+        # We must do it here. In case if datasource is not defined by user, we can take it from dataset
 
         datasource_id = get_parameters().get('quicksight-datasource-id')
-        role_arn = get_parameters().get('quicksight-datasource-role-arn')
         if datasource_id:
             # We have explicit choice of datasource
             try:
                 athena_datasource = self.qs.describe_data_source(datasource_id)
             except self.qs.client.exceptions.ResourceNotFoundException:
                 logger.info(f'DataSource {datasource_id} not found. Creating.')
-                athena_datasource = self.qs.create_data_source(
-                    athena_workgroup=self.athena.WorkGroup,
-                    datasource_id=datasource_id,
-                    role_arn=role_arn
-                )
+                athena_datasource = self.create_datasource(datasource_id)
             except self.qs.client.exceptions.AccessDeniedException:
                 logger.warning(f'AccessDenied reading QuickSight DataSource {datasource_id}. Trying to continue.')
                 athena_datasource = Datasource(raw={
                     'AthenaParameters':{},
                     "Id": datasource_id,
-                    "Arn": f"arn:aws:quicksight:{self.base.session.region_name}:{self.base.account_id}:datasource/{datasource_id}",
+                    "Arn": f"arn:{self.base.partition}:quicksight:{self.base.session.region_name}:{self.base.account_id}:datasource/{datasource_id}",
                 })
             except Exception as exc:
                 raise CidCritical(
                     f'quicksight-datasource-id={datasource_id} not found or not in a valid state.'
                 ) from exc
         else:
-                # We have no explicit DataSource in parameters
-                # QuickSight DataSources are not obvious for customer so we will try to do our best guess
-                # - if there is just one? -> silently take that one
-                # - if DataSource is references in existing DataSet? -> silently take that one
-                # - if athena WorkGroup defined -> Try to find a DataSource with this WorkGroup
-                # - and if still nothing -> ask an explicit choice from the user
-                pre_compiled_dataset = json.loads(template.safe_substitute())
-                dataset_name = pre_compiled_dataset.get('Name')
+            # We have no explicit DataSource in parameters
+            # QuickSight DataSources are not obvious for customer so we will try to do our best guess
+            # - if there is just one? -> silently take that one
+            # - if DataSource is references in existing DataSet? -> silently take that one
+            # - if athena WorkGroup defined -> Try to find a DataSource with this WorkGroup
+            # - and if still nothing -> ask an explicit choice from the user
+            pre_compiled_dataset = json.loads(template.safe_substitute())
+            dataset_name = pre_compiled_dataset.get('Name')
 
-                # let's find the schema/database and workgroup name
-                schemas = []
-                datasources = []
-                if dataset_id:
-                    schemas = self.qs.get_datasets(id=dataset_id)[0].schemas
-                    datasources = self.qs.get_datasets(id=dataset_id)[0].datasources
-                else: # try to find dataset and get athena database
-                    found_datasets = self.qs.get_datasets(name=dataset_name)
-                    logger.debug(f'Related to dataset {dataset_name}: {[ds.id for ds in found_datasets]}')
-                    if found_datasets:
-                        schemas = list(set(sum([d.schemas for d in found_datasets], [])))
-                        datasources = list(set(sum([d.datasources for d in found_datasets], [])))
-                        logger.debug(f'Found following schemas={schemas}, related to dataset with name {dataset_name}')
-                logger.info(f'Found {len(datasources)} Athena DataSources related to the DataSet {dataset_name}')
+            # let's find the schema/database and workgroup name
+            schemas = []
+            datasources = []
+            if dataset_id:
+                schemas = self.qs.get_datasets(id=dataset_id)[0].schemas
+                datasources = self.qs.get_datasets(id=dataset_id)[0].datasources
+            else: # try to find dataset and get athena database
+                found_datasets = self.qs.get_datasets(name=dataset_name)
+                logger.debug(f'Related to dataset {dataset_name}: {[ds.id for ds in found_datasets]}')
+                if found_datasets:
+                    schemas = list(set(sum([d.schemas for d in found_datasets], [])))
+                    datasources = list(set(sum([d.datasources for d in found_datasets], [])))
+                    logger.debug(f'Found following schemas={schemas}, related to dataset with name {dataset_name}')
+            logger.info(f'Found {len(datasources)} Athena DataSources related to the DataSet {dataset_name}')
 
-                if not get_parameters().get('athena-database') and len(schemas) == 1 and schemas[0]:
-                    logger.debug(f'Picking the database={schemas[0]}')
-                    self.athena.DatabaseName = schemas[0]
-                # else user will be suggested to choose database anyway
+            if not get_parameters().get('athena-database') and len(schemas) == 1 and schemas[0]:
+                logger.debug(f'Picking the database={schemas[0]}')
+                self.athena.DatabaseName = schemas[0]
+            # else user will be suggested to choose database anyway
 
-                if len(datasources) == 1 and datasources[0] in self.qs.athena_datasources:
-                    athena_datasource = self.qs.get_datasources(id=datasources[0])[0]
-                    logger.info(f'Silently selecting the only available DataSources: {datasources[0]}.')
+            if len(datasources) == 1 and datasources[0] in self.qs.athena_datasources:
+                athena_datasource = self.qs.get_datasources(id=datasources[0])[0]
+                logger.info(f'Silently selecting the only available DataSources from other datasets: {datasources[0]}.')
+            else:
+                # Ask user to choose the datasource
+                # Narrow the choice to only datasources with the given workgroup
+                datasources_with_workgroup = self.qs.get_datasources(athena_workgroup_name=self.athena.WorkGroup)
+                logger.info(f'Found {len(datasources_with_workgroup)} Athena DataSources with WorkGroup={self.athena.WorkGroup}.')
+                datasource_choices = {
+                    f"{datasource.name} {datasource.id} (workgroup={datasource.AthenaParameters.get('WorkGroup')})": datasource.id
+                    for datasource in datasources_with_workgroup
+                }
+                if 'CID-CMD-Athena' not in list(datasource_choices.values()):
+                    datasource_choices['CID-CMD-Athena <CREATE NEW DATASOURCE>'] = 'Create New DataSource'
+                #TODO: add possibility to update datasource and role
+                datasource_id = get_parameter(
+                    param_name='quicksight-datasource-id',
+                    message=f"Please choose DataSource (Select the first one if not sure)",
+                    choices=datasource_choices,
+                )
+                if not datasource_id or datasource_id == 'Create New DataSource':
+                    datasource_id = 'CID-CMD-Athena'
+                    logger.info(f'Creating DataSource {datasource_id}')
+                    athena_datasource = self.create_datasource(datasource_id)
+                    set_parameters(parameters={'quicksight-datasource-id': datasource_id}) # for next usage
                 else:
-                    #try to find a datasource with defined workgroup
-                    workgroup = self.athena.WorkGroup
-                    datasources_with_workgroup = self.qs.get_datasources(
-                        athena_workgroup_name=workgroup,
-                        athena_role_arn=role_arn,
-                    )
-                    logger.info(f'Found {len(datasources_with_workgroup)} Athena DataSources with WorkGroup={workgroup}.')
-                    if len(datasources_with_workgroup) == 1:
-                        athena_datasource = datasources_with_workgroup[0]
-                        logger.info(f'Silently selecting the only available option: {athena_datasource}.')
-                    else:
-                        #cannot find the right athena_datasource
-                        datasource_choices = {
-                            f"{datasource.name} {datasource.id} (workgroup={datasource.AthenaParameters.get('WorkGroup')})": datasource.id
-                            for datasource in datasources_with_workgroup
-                        }
-                        datasource_choices['Create New DataSource'] = 'Create New DataSource'
-                        datasource_id = get_parameter(
-                            param_name='quicksight-datasource-id',
-                            message=f"Please choose DataSource (Choose the first one if not sure).",
-                            choices=datasource_choices,
-                        )
-                        if not datasource_id or datasource_id == 'Create New DataSource':
-                            datasource_id = 'CID-CMD-Athena'
-                            logger.info(f'Creating DataSource {datasource_id}')
-                            athena_datasource = self.qs.create_data_source(
-                                athena_workgroup=self.athena.WorkGroup,
-                                datasource_id=datasource_id,
-                                role_arn=role_arn
-                            )
-                        else:
-                            athena_datasource = self.qs.get_datasources(id=datasource_id)[0]
-                        logger.info(f'Using  DataSource = {athena_datasource.id}')
+                    athena_datasource = self.qs.get_datasources(id=datasource_id)[0]
+                logger.info(f'Using  DataSource = {athena_datasource.id if athena_datasource else "N/A"}')
         if not get_parameters().get('athena-workgroup'):
             # set default workgroup from datasource if not provided via parameters
             if isinstance(athena_datasource, Datasource) and athena_datasource.AthenaParameters.get('WorkGroup', None):
@@ -1305,7 +1447,7 @@ class Cid():
 
         # Check for required views
         _views = dataset_definition.get('dependsOn', {}).get('views', [])
-        required_views = [(self.cur.tableName if cur_required and name =='${cur_table_name}' else name) for name in _views]
+        required_views = [(self.cur.table_name if cur_required and name =='${cur_table_name}' else name) for name in _views]
 
         self.athena.discover_views(required_views)
         found_views = utils.intersection(required_views, self.athena._metadata.keys())
@@ -1314,11 +1456,11 @@ class Cid():
         if recursive:
             print(f"Detected views: {', '.join(found_views)}")
             for view_name in found_views:
-                if cur_required and view_name == self.cur.tableName:
-                    logger.debug(f'Dependancy view {view_name} is a CUR. Skip.')
+                if cur_required and view_name == self.cur.table_name:
+                    logger.debug(f'Dependency view {view_name} is a CUR. Skip.')
                     continue
                 if view_name == 'account_map':
-                    logger.debug(f'Dependancy view is {view_name}. Skip.')
+                    logger.debug(f'Dependency view is {view_name}. Skip.')
                     continue
                 self.create_or_update_view(view_name, recursive=recursive, update=update)
 
@@ -1328,12 +1470,14 @@ class Cid():
             for view_name in missing_views:
                 self.create_or_update_view(view_name, recursive=recursive, update=update)
 
-        if not isinstance(athena_datasource, Datasource): return False
+        if not isinstance(athena_datasource, Datasource):
+            print('athena_datasource is not defined')
+            return False
         # Proceed only if all the parameters are set
         columns_tpl = {
             'athena_datasource_arn': athena_datasource.arn,
             'athena_database_name': self.athena.DatabaseName,
-            'cur_table_name': self.cur.tableName if cur_required else None
+            'cur_table_name': self.cur.table_name if cur_required else None
         }
 
         logger.debug(f'dataset_id={dataset_id}')
@@ -1387,7 +1531,7 @@ class Cid():
                         else:
                             raise CidCritical(f'User choice is not to update {found_dataset.name}.')
                     elif not diff:
-                        if not get_parameter(
+                        if get_parameter(
                             param_name=found_dataset.name.lower().replace(' ', '-') + '-override',
                             message=f'Cannot get sql diff for {found_dataset.name}. Continue?',
                             choices=['override', 'exit'],
@@ -1417,12 +1561,13 @@ class Cid():
 
 
     def create_or_update_view(self, view_name: str, recursive: bool=True, update: bool=False) -> None:
-        # For account mappings create a view using a special helper
-        if view_name in self._visited_views: # avoid checking a views multiple times in one cid session
+        # Avoid checking a views multiple times in one cid session
+        if view_name in self._visited_views:
             return
-        logger.info(f'Processing view: {view_name}')
         self._visited_views.append(view_name)
+        logger.info(f'Processing view: {view_name}')
 
+        # For account mappings create a view using a special helper
         if view_name in ['account_map', 'aws_accounts']:
             if view_name in self.athena._metadata.keys():
                 print(f'Account map {view_name} exists. Skipping.')
@@ -1440,10 +1585,20 @@ class Cid():
             logger.info(f"Definition is unavailable {view_name}")
             return
         logger.debug(f'View definition: {view_definition}')
+        dependencies = view_definition.get('dependsOn', {})
+
+        # Process CUR columns
+        if isinstance(dependencies.get('cur'), list):
+            for column in dependencies.get('cur'):
+                self.cur.ensure_column(column)
+        elif isinstance(dependencies.get('cur'), dict):
+            for column, column_type in dependencies.get('cur').items():
+                self.cur.ensure_column(column, column_type)
 
         if recursive:
-            dependency_views = view_definition.get('dependsOn', dict()).get('views', list())
-            if 'cur' in dependency_views: dependency_views.remove('cur')
+            dependency_views = dependencies.get('views', [])
+            if 'cur' in dependency_views:
+                dependency_views.remove('cur')
             # Discover dependency views (may not be discovered earlier)
             self.athena.discover_views(dependency_views)
             logger.info(f"Dependency views: {', '.join(dependency_views)}" if dependency_views else 'No dependency views')
@@ -1468,7 +1623,7 @@ class Cid():
                     elif 'CREATE OR REPLACE' in view_query.upper():
                         update_view = False
                         while get_parameters().get('on-drift', 'show').lower() != 'override' and isatty():
-                            cid_print(f'Analysing view {view_name}')
+                            cid_print(f'Analyzing view {view_name}')
                             diff = self.athena.get_view_diff(view_name, view_query)
                             if diff and diff['diff']:
                                 cid_print(f'<BOLD>Found a difference between existing view <YELLOW>{view_name}<END> <BOLD>and the one we want to deploy. <END>')
@@ -1508,8 +1663,6 @@ class Cid():
                     logger.debug('Start waiting')
                     assert self.athena.wait_for_view(view_name), f"Failed to update a view {view_name}"
                     logger.info(f'View "{view_name}" updated')
-            else:
-                return
         else: # No found -> creation
             logger.info(f'Creating view: "{view_name}"')
             if view_definition.get('type') == 'Glue_Table':
@@ -1527,17 +1680,58 @@ class Cid():
                 assert self.athena.wait_for_view(view_name), f"Failed to create a view {view_name}"
                 logger.info(f'View "{view_name}" created')
 
+        if 'crawler' in view_definition:
+            if not ('CREATE EXTERNAL TABLE' in view_query.upper() or view_definition.get('type') == 'Glue_Table'):
+                raise CidCritical(f'Crawler cannot be defined for a view ({view_name}). only for a table. Pease fix resource definitions')
+            location = self.glue.get_table(name=view_name, catalog=self.base.account_id, database=self.athena.DatabaseName).get('StorageDescriptor', {}).get('Location')
+            self.create_or_update_crawler(crawler_name=view_definition['crawler'], location=location)
+
+    def create_or_update_crawler(self, crawler_name, location):
+        """ Create or Update Crawler """
+        crawler_definition = self.get_definition("crawler", name=crawler_name)
+        data = self.get_data_from_definition('crawler', crawler_definition)
+        template = Template(json.dumps(data))
+
+        # Filter roles trusted by Glue
+        glue_trusted_roles = list(self.iam.iterate_role_names(search="Roles[?AssumeRolePolicyDocument.Statement[?Principal.Service == 'glue.amazonaws.com']].RoleName"))
+        table = [fragment for fragment in location.split('/') if fragment][-1].lower().replace('-', '_')
+        crawler_role = get_parameter(
+            'crawler-role',
+            message='Provide a crawler role name',
+            choices=glue_trusted_roles + ['CidCmdCurCrawlerRole <CREATE NEW>']
+        )
+        if 'CREATE NEW' in crawler_role:
+            crawler_role = 'CidCmdCurCrawlerRole'
+            self.iam.ensure_role_for_crawler(
+                s3bucket=location.split('/')[2],
+                database=self.athena.DatabaseName,
+                table=table,
+                role_name=crawler_role
+            )
+
+        if not crawler_role.startswith('arn:'):
+            crawler_role_arn = f"arn:aws:iam::{self.base.account_id}:role/{crawler_role}"
+        else:
+            crawler_role_arn = crawler_role
+        params = {
+            'athena_database_name': self.athena.DatabaseName,
+            'crawler_role_arn': crawler_role_arn,
+            'location': location,
+        }
+        compiled_definition = json.loads(template.safe_substitute(params))
+        self.glue.create_or_update_crawler(crawler_definition=compiled_definition)
+
 
     def get_view_query(self, view_name: str) -> str:
         """ Returns a fully compiled AHQ """
         # View path
         view_definition = self.get_definition("view", name=view_name)
         cur_required = view_definition.get('dependsOn', dict()).get('cur')
-        if cur_required and self.cur.hasSavingsPlans and self.cur.hasReservations and view_definition.get('spriFile'):
+        if cur_required and self.cur.has_savings_plans and self.cur.has_reservations and view_definition.get('spriFile'):
             view_definition['File'] = view_definition.get('spriFile')
-        elif cur_required and self.cur.hasSavingsPlans and view_definition.get('spFile'):
+        elif cur_required and self.cur.has_savings_plans and view_definition.get('spFile'):
             view_definition['File'] = view_definition.get('spFile')
-        elif cur_required and self.cur.hasReservations and view_definition.get('riFile'):
+        elif cur_required and self.cur.has_reservations and view_definition.get('riFile'):
             view_definition['File'] = view_definition.get('riFile')
         elif view_definition.get('File') or view_definition.get('Data') or view_definition.get('data'):
             pass
@@ -1548,13 +1742,13 @@ class Cid():
         # Load TPL file
         data = self.get_data_from_definition('view', view_definition)
         if isinstance(data, dict):
-            template = Template(json.dumps(data))
+            template = Template(yaml.safe_dump(data))
         else:
             template = Template(data)
 
         # Prepare template parameters
         columns_tpl = {
-            'cur_table_name': self.cur.tableName if cur_required else None,
+            'cur_table_name': self.cur.table_name if cur_required else None,
             'athenaTableName': view_name,
             'athena_database_name': self.athena.DatabaseName,
         }
@@ -1586,6 +1780,54 @@ class Cid():
             self.accountMap.create(v)
 
     @command
-    def initqs(self, **kwargs):
+    def teardown(self, **kwargs):
+        """remove all assets created by cid"""
+        for dashboard in list(self.qs.dashboards.values()):
+            self.delete(dashboard.id)
+        self.iam.ensure_role_does_not_exist('CidCmdQuickSightDataSourceRole')
+        self.iam.ensure_role_does_not_exist('CidCmdCurCrawlerRole')
+        self.qs.delete_data_source('CID-CMD-Athena')
+
+    @command
+    def init_qs(self, **kwargs):
         """ Initialize QuickSight resources for deployment """
         return InitQsCommand(cid=self, **kwargs).execute()
+
+    @command
+    def create_cur_table(self, **kwargs):
+        """ Initialize CUR """
+        if get_parameters().get('view-cur-location'):
+            s3path = get_parameters().get('view-cur-location')
+        else:
+            bucket = get_parameter(
+                'view-cur-s3-bucket',
+                message='Enter a bucket with CUR',
+                choices=self.s3.list_buckets(),
+            )
+            s3path = get_parameter(
+                'view-cur-location',
+                message='Enter an S3 path. We support only 2 types of CUR path: s3://{bucket}/cur and s3://{bucket}/{prefix}/{name}/{name}',
+                default=f's3://{bucket}/cur/',
+            )
+        path_fragments = [fragment for fragment in s3path.split('/')[3:] if fragment]
+
+        if path_fragments == ['cur']: # our standard cur created by CID
+            set_parameters({
+                'view-cur-partitions': (
+                    '[{"Name":"source_account_id","Type":"string"},'
+                    '{"Name":"cur_name_1","Type":"string"},'
+                    '{"Name":"cur_name_2","Type":"string"},'
+                    '{"Name":"year","Type":"string"},'
+                    '{"Name":"month","Type":"string"}]'
+                )
+            })
+        elif len(path_fragments) == 3 and path_fragments[-1] == path_fragments[-2]: # CUR that is not created by CID but still supported
+            set_parameters({'view-cur-partitions': '[{"Name":"year","Type":"string"},{"Name":"month","Type":"string"}]'})
+        else:
+            raise NotImplementedError(f"We support only 2 types of CUR and this is something else ({s3path}).")
+
+        set_parameters({'crawler-cur-s3path': get_parameters().get('view-cur-location')})
+        cid_print('Creating / updating CUR table')
+        self.create_or_update_view(view_name='cur')
+        cid_print('Please check crawler in a few minutes https://console.aws.amazon.com/glue/home?#/v2/data-catalog/crawlers')
+        set_parameters({'cur-table-name': path_fragments[-1].lower().replace('-', '_')})

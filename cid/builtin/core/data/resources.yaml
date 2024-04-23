@@ -2,9 +2,11 @@
 # QuickSight Dashboards definitions
 dashboards:
   CUDOS:
+    category: 'Deprecated'
     name: CUDOS Dashboard
     templateId: cudos_dashboard_v3
     dashboardId: cudos
+    deprecationNotice: "This version of the CUDOS deprecated. Deploy CUDOS Dashboard v5 instead"
     localConfigs: ["update-dashboard.json"]
     dependsOn:
       datasets:
@@ -16,8 +18,22 @@ dashboards:
     versions:
       minTemplateVersion: 189
       minTemplateDescription: "v4.75.0"
+  CUDOSv5:
+    category: 'Foundational'
+    name: CUDOS Dashboard v5
+    templateId: cudos_v5
+    dashboardId: cudos-v5
+    dependsOn:
+      datasets:
+        - summary_view
+        - hourly_view
+        - resource_view
+    versions:
+      minTemplateVersion: 1
+      minTemplateDescription: "v5.0.0"
 
   CID:
+    category: 'Foundational'
     name: Cost Intelligence Dashboard
     templateId: Cost_Intelligence_Dashboard
     dashboardId: cost_intelligence_dashboard
@@ -32,6 +48,7 @@ dashboards:
       minTemplateDescription: "v3.1.0"
 
   KPI:
+    category: 'Foundational'
     name: KPI Dashboard
     templateId: kpi_dashboard
     dashboardId: kpi_dashboard
@@ -48,6 +65,7 @@ dashboards:
       minTemplateDescription: "v1.2.1"
 
   TAO:
+    category: 'Advanced'
     name: Trusted Advisor Organizational View
     templateId: ta-organizational-view
     dashboardId: ta-organizational-view
@@ -59,6 +77,7 @@ dashboards:
       minTemplateDescription: "v1.4.0"
 
   Trends:
+    category: 'Additional'
     name: Trends Dashboard
     templateId: cudos-trends-dashboard-template
     dashboardId: trends-dashboard
@@ -72,6 +91,7 @@ dashboards:
       minTemplateDescription: "v5.0.0"
 
   Compute Optimizer:
+    category: 'Advanced'
     name: Compute Optimizer Dashboard
     templateId: compute_optimizer
     dashboardId: compute-optimizer-dashboard
@@ -88,15 +108,17 @@ dashboards:
 
 # QuickSight DataSets definitions
 datasets:
-  # CID Shared DataSets
+  # Shared DataSet between CUDOS, CID and KPI
   summary_view:
     File: cid/summary_view.json
     dependsOn:
       views:
+        - account_map
         - summary_view
         - ri_sp_mapping
     schedules:
       - default
+  # CID dataset
   ec2_running_cost:
     File: cid/ec2_running_cost.json
     dependsOn:
@@ -104,6 +126,7 @@ datasets:
         - ec2_running_cost
     schedules:
       - default
+  # CID dataset
   compute_savings_plan_eligible_spend:
     File: cid/compute.json
     dependsOn:
@@ -111,6 +134,7 @@ datasets:
         - compute_savings_plan_eligible_spend
     schedules:
       - default
+  # CID dataset
   s3_view:
     File: cid/s3_view.json
     dependsOn:
@@ -120,14 +144,30 @@ datasets:
     schedules:
       - default
 
-  # Shared DataSets
+  # CUDOS v4 dataset
   customer_all:
     File: shared/customer_all.json
     dependsOn:
       cur: true
       views:
         - ${cur_table_name}
-
+  # CUDOS v5 datasets
+  hourly_view:
+    File: cudos/hourly_view.json
+    dependsOn:
+      views:
+        - hourly_view
+        - account_map
+    schedules:
+      - default
+  resource_view:
+    File: cudos/resource_view.json
+    dependsOn:
+      views:
+        - resource_view
+        - account_map
+    schedules:
+      - default
   # KPI DataSets
   kpi_ebs_snap:
     File: kpi/kpi_ebs_snap.json
@@ -227,7 +267,47 @@ views:
     riFile: cid/summary_view_ri.sql
     File: cid/summary_view.sql
     dependsOn:
-      cur: true
+      cur:
+        - bill_billing_entity
+        - bill_billing_period_start_date
+        - bill_invoice_id
+        - bill_payer_account_id
+        - line_item_availability_zone
+        - line_item_legal_entity
+        - line_item_line_item_description
+        - line_item_line_item_type
+        - line_item_operation
+        - line_item_product_code
+        - line_item_resource_id
+        - line_item_unblended_cost
+        - line_item_usage_account_id
+        - line_item_usage_amount
+        - line_item_usage_start_date
+        - line_item_usage_type
+        - pricing_public_on_demand_cost
+        - pricing_unit
+        - product_current_generation
+        - product_database_engine
+        - product_from_location
+        - product_group
+        - product_operating_system
+        - product_physical_processor
+        - product_processor_features
+        - product_product_family
+        - product_product_name
+        - product_region
+        - product_servicecode
+        - product_tenancy
+        - product_to_location
+        - reservation_effective_cost
+        - reservation_reservation_a_r_n
+        - reservation_unused_amortized_upfront_fee_for_billing_period
+        - reservation_unused_recurring_fee
+        - savings_plan_amortized_upfront_commitment_for_billing_period
+        - savings_plan_savings_plan_a_r_n
+        - savings_plan_savings_plan_effective_cost
+        - savings_plan_total_commitment_to_date
+        - savings_plan_used_commitment
 
   ec2_running_cost:
     spriFile: cid/ec2_running_cost_sp_ri.sql
@@ -235,17 +315,52 @@ views:
     riFile: cid/ec2_running_cost_ri.sql
     File: cid/ec2_running_cost.sql
     dependsOn:
-      cur: true
+      cur:
+        - bill_billing_period_start_date
+        - bill_payer_account_id
+        - line_item_line_item_type
+        - line_item_unblended_cost
+        - line_item_usage_account_id
+        - line_item_usage_amount
+        - line_item_usage_start_date
+        - line_item_usage_type
+        - reservation_effective_cost
+        - reservation_reservation_a_r_n
+        - savings_plan_savings_plan_a_r_n
+        - savings_plan_savings_plan_effective_cost
 
   compute_savings_plan_eligible_spend:
     File: cid/compute_savings_plan_eligible_spend.sql
     dependsOn:
       cur: true
+        - bill_billing_period_start_date
+        - bill_payer_account_id
+        - line_item_line_item_type
+        - line_item_operation
+        - line_item_product_code
+        - line_item_unblended_cost
+        - line_item_usage_account_id
+        - line_item_usage_start_date
+        - line_item_usage_type
+        - product_servicecode
 
   s3_view:
     File: cid/s3.sql
     dependsOn:
-      cur: true
+      cur:
+        - bill_billing_period_start_date
+        - bill_payer_account_id
+        - line_item_line_item_type
+        - line_item_operation
+        - line_item_product_code
+        - line_item_resource_id
+        - line_item_unblended_cost
+        - line_item_usage_account_id
+        - line_item_usage_amount
+        - line_item_usage_start_date
+        - pricing_public_on_demand_cost
+        - pricing_unit
+        - product_region
 
   ri_sp_mapping:
     spriFile: cid/ri_sp_mapping_sp_ri.sql
@@ -253,7 +368,84 @@ views:
     riFile: cid/ri_sp_mapping_ri.sql
     File: cid/ri_sp_mapping.sql
     dependsOn:
-      cur: true
+      cur:
+        - bill_billing_period_start_date
+        - bill_payer_account_id
+        - line_item_line_item_type
+        - pricing_lease_contract_length
+        - pricing_offering_class
+        - pricing_purchase_option
+        - reservation_reservation_a_r_n
+        - savings_plan_end_time
+        - savings_plan_savings_plan_a_r_n
+
+  hourly_view:
+    spriFile: cudos/hourly_view_sp_ri.sql
+    spFile: cudos/hourly_view_sp.sql
+    riFile: cudos/hourly_view_ri.sql
+    File: cudos/hourly_view.sql
+    dependsOn:
+      cur:
+        - bill_billing_period_start_date
+        - bill_payer_account_id
+        - line_item_line_item_description
+        - line_item_line_item_type
+        - line_item_operation
+        - line_item_product_code
+        - line_item_unblended_cost
+        - line_item_usage_account_id
+        - line_item_usage_amount
+        - line_item_usage_start_date
+        - line_item_usage_type
+        - pricing_term
+        - pricing_unit
+        - product_region
+        - product_servicecode
+        - reservation_effective_cost
+        - reservation_reservation_a_r_n
+        - savings_plan_savings_plan_a_r_n
+        - savings_plan_savings_plan_effective_cost
+
+  resource_view:
+    spriFile: cudos/resource_view_sp_ri.sql
+    spFile: cudos/resource_view_sp.sql
+    riFile: cudos/resource_view_ri.sql
+    File: cudos/resource_view.sql
+    dependsOn:
+      cur:
+        - bill_billing_entity
+        - bill_payer_account_id
+        - line_item_legal_entity
+        - line_item_line_item_description
+        - line_item_line_item_type
+        - line_item_operation
+        - line_item_product_code
+        - line_item_resource_id
+        - line_item_unblended_cost
+        - line_item_usage_account_id
+        - line_item_usage_amount
+        - line_item_usage_start_date
+        - line_item_usage_type
+        - pricing_term
+        - pricing_unit
+        - product_database_engine
+        - product_deployment_option
+        - product_from_location
+        - product_group
+        - product_instance_type
+        - product_instance_type_family
+        - product_operating_system
+        - product_product_family
+        - product_product_name
+        - product_region
+        - product_servicecode
+        - product_storage
+        - product_to_location
+        - product_volume_api_name
+        - reservation_effective_cost
+        - reservation_reservation_a_r_n
+        - savings_plan_savings_plan_a_r_n
+        - savings_plan_savings_plan_effective_cost
 
   # Trends
   daily_anomaly_detection:
@@ -336,7 +528,7 @@ views:
     File: tao/glue_table.json
     parameters:
       s3FolderPath:
-        default: 's3://costoptimizationdata{account_id}/trusted-advisor/trusted-advisor-data'
+        default: 's3://cid-data-{account_id}/trusted-advisor/trusted-advisor-data'
         description: Trusted Advisor Organization View report S3 path
   ta_org_view:
     File: tao/ta_org_view.sql
@@ -350,7 +542,7 @@ views:
     File: co/ec2_instance.json
     parameters:
       s3FolderPath:
-        default: 's3://costoptimizationdata{account_id}/compute_optimizer/compute_optimizer_ec2_instance'
+        default: 's3://cid-data-{account_id}/compute_optimizer/compute_optimizer_ec2_instance'
         description: Compute Optimiser EC2 report S3 path
 
   compute_optimizer_auto_scale_lines:
@@ -358,7 +550,7 @@ views:
     File: co/auto_scale.json
     parameters:
       s3FolderPath:
-        default: 's3://costoptimizationdata{account_id}/compute_optimizer/compute_optimizer_auto_scale'
+        default: 's3://cid-data-{account_id}/compute_optimizer/compute_optimizer_auto_scale'
         description: Compute Optimiser auto_scale report S3 path
 
   compute_optimizer_ebs_volume_lines:
@@ -366,7 +558,7 @@ views:
     File: co/ebs_volume.json
     parameters:
       s3FolderPath:
-        default: 's3://costoptimizationdata{account_id}/compute_optimizer/compute_optimizer_ebs_volume'
+        default: 's3://cid-data-{account_id}/compute_optimizer/compute_optimizer_ebs_volume'
         description: Compute Optimiser EBS report S3 path
 
   compute_optimizer_lambda_lines:
@@ -374,7 +566,7 @@ views:
     File: co/lambda.json
     parameters:
       s3FolderPath:
-        default: 's3://costoptimizationdata{account_id}/compute_optimizer/compute_optimizer_lambda'
+        default: 's3://cid-data-{account_id}/compute_optimizer/compute_optimizer_lambda'
         description: Compute Optimiser Lambda report S3 path
 
   compute_optimizer_ec2_instance_options:
@@ -431,6 +623,19 @@ views:
         - aws_accounts
   ta_descriptions:
     File: shared/ta_descriptions.sql
+  cur:
+    type: Glue_Table
+    File: shared/cur.yaml
+    crawler: cur
+    parameters:
+      partitions:
+        type: cur.partitions
+        description: 'comma separated list of CUR partitions ex: ["source_account_id","cur_name_1","cur_name_2","year","month"] ex2: ["year","month"]'
+        default: '[{"Name":"source_account_id","Type":"string"},{"Name":"cur_name_1","Type":"string"},{"Name":"cur_name_2","Type":"string"},{"Name":"year","Type":"string"},{"Name":"month","Type":"string"}]'
+      location:
+        type: cur.location
+        description: 's3 path'
+        default: 's3://cid-{account_id}-shared/cur/'
 
 # Refresh Schedules for QuickSight DataSets
 schedules:
@@ -440,3 +645,45 @@ schedules:
       Interval: DAILY
       TimeOfTheDay: '02:00-05:00'
     RefreshType: FULL_REFRESH
+
+crawlers:
+  cur:
+    data:
+      Name:  'CidCmdCurCrawler'
+      Description: A recurring crawler that keeps your CUR table in Athena up-to-date.
+      Role:  ${crawler_role_arn}
+      DatabaseName: "${athena_database_name}"
+      Targets:
+        S3Targets:
+          - Path: ${location}
+            Exclusions:
+              - '**.json'
+              - '**.yml'
+              - '**.sql'
+              - '**.csv'
+              - '**.csv.metadata'
+              - '**.gz'
+              - '**.zip'
+              - '**/cost_and_usage_data_status/*'
+              - 'aws-programmatic-access-test-object'
+      SchemaChangePolicy:
+        DeleteBehavior: LOG
+      RecrawlPolicy:
+        RecrawlBehavior: CRAWL_EVERYTHING
+      Schedule: cron(0 2 * * ? *)
+      Configuration: |
+        {
+          "Version":1.0,
+          "Grouping": {
+            "TableGroupingPolicy": "CombineCompatibleSchemas"
+          },
+          "CrawlerOutput":{
+            "Tables":{
+              "AddOrUpdateBehavior":"MergeNewColumns"
+            }
+          }
+        }
+    parameters:
+      s3path:
+        default: 's3://cid-{account_id}-cur/cur/'
+        description: CUR path

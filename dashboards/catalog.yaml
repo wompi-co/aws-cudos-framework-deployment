@@ -1,0 +1,8 @@
+Resources:
+  - Url: cost-anomalies/cost-anomalies.yaml
+  - Url: sustainability-proxy-metrics/sustainability-proxy-metrics.yaml
+  - Url: data-transfer/DataTransfer-Cost-Analysis-Dashboard.yaml
+  - Url: aws-marketplace/aws-marketplace-spg.yaml
+  - Url: extended-support-cost-projection/extended-support-cost-projection.yaml
+  - Url: graviton-opportunities-dashboard/graviton_dashboard.yaml
+  - Url: scad-containers-cost-allocation/scad-containers-cost-allocation.yaml

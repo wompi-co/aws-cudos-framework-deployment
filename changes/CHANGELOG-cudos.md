@@ -1,5 +1,66 @@
 # What's new in CUDOS Dashboard
 
+# CUDOS v5
+
+# CUDOS - 5.3
+
+* **AI/ML:** Added section 'Amazon Q' which provide insights into Amazon Q spend and usage details with visuals 'Amazon Q spend trend', 'Amazon Q Index usage trend', 'Amazon Q spend per Account', 'Amazon Q spend per Region', 'Amazon Q spend per Operation', 'Amazon Q Index Daily Unit Usage per Account'
+* **AI/ML:** Added visual 'SageMaker ML instance Hourly Spend by Purchase Option'. 'SageMaker Spend and Unit Cost by Instance Type' changed to 'SageMaker Spend and Unit Cost by Instance Family' with ability to drill down to Instance Type
+* **AI/ML:** Amazon Bedrock spend per UsageType Group now categorizes Bedrock spend by Image Generation, Input Tokes, Output Tokens, Model Units and Model Customization
+* **Storage & Backup:** Sheet 'Storage' renamed to 'Storage & Backup'. Added section Backup with visuals to track cost and usage insights for backup storage and snapshots, namely 'Backup spend per Service', 'Backup spend per Account', 'Backup spend per Region', 'Backup spend per Usage Type', 'Daily Backup spend per Service', 'Daily Backup Spend per Resource' and 'Backup Spend Detailed Resource View'
+* **Compute:** New section EC2 Compute Elasticity with visuals which show % of usage time per instance over last 30 days to identify instances and accounts which could be scheduled to stop when they are not needed, namely 'Average EC2 Instance Usage time % and Cost per Account', 'EC2 Hourly Cost', 'EC2 Instances Usage time % and Cost' and 'EC2 Instances Daily Usage in Hours'
+* **Compute:** New visual 'Lambda Spend per Processor Architecture' to track adoption of Arm/Graviton 2 based Lambda functions.
+* **Compute:** New EKS Extended Support section with visuals 'EKS Extended Support Cost', 'EKS Extended Support Cost per Account', 'EKS Clusters with Extended Support'
+* **Databases:** New Section Databases Elasticity with visuals which show % of usage time per resource over last 30 days to identify instances and accounts which could be scheduled to stop when they are not needed, namely 'Databases Average Usage time % and Cost', 'Databases Hourly Usage', 'Databases Usage time % and Cost per Resource', 'Databases Instances Daily Usage in Hours'
+* **Databases:** Added Amazon MemoryDB spend and usage to the existing visuals
+* **Monitoring and Observability:** 'CloudTrail Usage Cost by Usage Type' now groups by usage type without region prefix to simplify CloudTrail cost tracking  
+
+# CUDOS - 5.2
+
+* **Databases:** New RDS Extended Support section with 'RDS Extended Support Cost', 'RDS Extended Support Cost per Account' and 'RDS Extended Support Cost per Resource' visuals
+* **MoM Trends**: New control MoM Comparison Type which allows to switch between Calendar Month (default) and Normalized Month. With Normalized Month every month is normalized to amount of days in the prevois month for more accurate MoM comparison. Normalized Month = average daily cost for the month * amount of days in previous month
+* **Data Transfer & Networking:** New Data Transfer Type NAT Gateway Data Processed which allows to see cost and usage for data processed by NAT Gateways.
+* **Amazon S3:** Added tooltip with usage amount and pricing unit to 'Total Cost per Bucket by Operation' visual
+* **Compute:** New visual 'EC2 Spot Savings per Account' 
+
+
+# CUDOS - 5.1.1
+
+**Changes**:
+* **Databases:** Fix for Normalized Instance Hours not shown on RI Coverage and Daily Elasticity visuals.
+
+# CUDOS - 5.1.0
+**Important!** If you have CUDOS v5.0.0 deployed you can use [standard update process](https://catalog.workshops.aws/awscid/en-US/dashboards/update). If you have previous version deployed follow [this guide](https://catalog.workshops.aws/awscid/en-US/faqs#how-to-update-to-cudos-v5-if-i-have-previous-version-of-cudos-installed) to deploy CUDOS v5. You can check version of your currently deployed dashboard on the About tab.
+
+**Changes**
+* **Executive: Billing Summary**: Added control to group Invoice and Amortized Spend by Payer Account, Charge Type Group and Service Category from [FOCUS](https://focus.finops.org/#specification) specification.
+* **Executive: Billing Summary**: Added top level filter control by Charge Type Group.
+* **Executive: MoM Trends**: Added top level filter control by Charge Type Group.
+* **[new tab] Analytics**: Introducing Analytics tab with visuals for Amazon QuickSight: 'QuickSight Spend per Account', 'QuickSight Spend per Usage Type Group', 'QuickSight Author Users historical Usage and Cost', 'QuickSight Reader Users Sessions Usage and Cost','QuickSight SPICE historical Usage (GB) and Cost', 'QuickSight Users Detailed View' and others.
+* **Amazon S3**: Added S3 Insights Explorer section which allows to focus on cost and usage of different S3 features and associated optimization opportunities such as 'Cross Region Replication Data Transfer', 'S3 Inventory', 'S3 Replication Time Control' and others.
+* **Amazon S3**: Added 'Amazon S3 Total Cost by Region' visual. Adjusted position of 'Total Cost per Bucket by Operation (Top 20)' visual and added drill down to usage type.
+* **Monitoring and Observability**: CloudWatch Usage Cost per Usage Type visual changed to show Usage Type Sub Group allowing to drill down to Usage Type. Added recommendation 'Consider using Infrequent Access log class at 50 percent lower per GB ingestion price'
+* **Databases**: Added Usage and Usage Unit tooltips to the 'RI Coverage per region | engine | instance type or family' visual.
+* **Storage**: Changed 'Volume Explorer: TOP 50 EBS Volume Details' filter from previous month to last 30 days.
+
+# CUDOS - 5.0.0
+**Important!** Learn more about CUDOS v5 and how to deploy in our [FAQ](https://catalog.workshops.aws/awscid/en-US/faqs#cudos-v5-faqs) page.
+
+**Changes**
+* Re-designed dataset structure. All datasets used by CUDOS v5 use fast QuickSight SPICE storage which reduces time required to load visuals. CUDOS v5 is using 3 datasets:
+    1. **summary_view** with historical data for last 7 months (by default) and with daily granularity for latest 3 months without resource details. See source code [here](https://github.com/aws-samples/aws-cudos-framework-deployment/blob/cudos_v5_cfn_changes/cid/builtin/core/data/queries/cid/summary_view_sp_ri.sql)
+    2. **resource_view** with cost and usage details for every resource for last 30 days with daily granularity. See source code [here](https://github.com/aws-samples/aws-cudos-framework-deployment/blob/main/cid/builtin/core/data/queries/cudos/resource_view_sp_ri.sql)
+    3. **hourly_view** with hourly granularity for last 30 days without resource level details. See source code [here](https://github.com/aws-samples/aws-cudos-framework-deployment/blob/cudos_v5_cfn_changes/cid/builtin/core/data/queries/cudos/hourly_view_sp_ri.sql)
+    Datasets **customer_all**, **ec2_running_cost** and **savings_plans_eligible_spend** are not used by CUDOS v5. 
+* **Executive: MoM Trends**: Introducing Service Category from [FOCUS](https://focus.finops.org/#specification) specification. Added visual '*Amortized Cost by Service Category*' with AWS services categorization according to FOCUS.
+* **Executive: MoM Trends**: Added '*Top 10 resources daily spend*' and '*Top 20 resources Cost and Usage*' which show top resources for selected dimentions on any other visual on the 'MoM Trends' tab.
+* **AI/ML**: Added Amazon Bedrock section with detailed visuals including Amazon Bedrock spend by Account, by Region, by Pricing Model, by UsageType Group and '*Bedrock Daily Cost per Resource (Model)*' and '*Bedrock Detailed Resource View*'.
+* **AI/ML**: Improved Usage Type Group on *'SageMaker spend per Usage Type Group'* visual to include SageMaker Canvas, Batch Transform and Asynchronous Inference
+* **Databases**: *'Daily Storage Cost'* visual now includes category for RDS Aurora I/O Optimized Storage. Improved date formatting to show day month and year in *'Daily Cost by Instance Family|Instance Type|Processor Type for All*' visual
+* **All tabs**: Improved styling in the table and pivot visuals
+
+# CUDOS v4 - Deprecated
+
 ## CUDOS - 4.79
 * **Data Transfer and Networking**: Added 'Public IPv4 addresses' section with 'Public IPv4 Cost and Projection (Last 30 days)', 'Public IPv4 Cost and Projection per Account (Last 30 days)' and 'Public IPv4 ENIs and Elastic IPs used more than 1 hr (Last 30 days)' visuals allowing to estimate cost impact for [Public IPv4 charges effective from February 1, 2024](https://aws.amazon.com/blogs/aws/new-aws-public-ipv4-address-charge-public-ip-insights/) and monitor cost of idle Elastic IP addresses 
 * **Compute**: Added section 'Amazon EC2 Spot Instances Savings' with best practices recommendations for Spot tools and usage optimization. Added visual 'EC2 Spot Savings Detailed View' which provides breakdown of Spot savings per platform, instance type, region and availability zone

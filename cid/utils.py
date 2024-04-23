@@ -1,8 +1,11 @@
 import os
 import sys
+import copy
+import math
 import inspect
 import logging
 import platform
+import datetime
 from typing import Any, Dict
 from functools import lru_cache as cache
 from collections.abc import Iterable
@@ -166,7 +169,7 @@ def set_parameters(parameters: dict, all_yes: bool=None) -> None:
         global _all_yes
         _all_yes = all_yes
 
-def is_unattendent_mode() -> bool:
+def is_unattended_mode() -> bool:
     return _all_yes
 
 def get_parameters():
@@ -206,8 +209,11 @@ def get_parameter(param_name, message, choices=None, default=None, none_as_disab
     if params.get(param_name):
         value = params[param_name]
         logger.info(f'Using {param_name}={value}, from parameters')
-        if isinstance(value, str):
-            value = value.format(**template_variables)
+        if isinstance(value, str) and template_variables:
+            try:
+                value = value.format(**template_variables)
+            except KeyError:
+                pass
         return value
 
     if choices is not None:
@@ -234,7 +240,8 @@ def get_parameter(param_name, message, choices=None, default=None, none_as_disab
             default=default,
         ).ask()
     else: # it is a text entry
-        if isinstance(default, str):
+        if isinstance(default, str) and template_variables:
+            print(template_variables)
             default=default.format(**template_variables)
         print()
         if not isatty():
@@ -243,7 +250,7 @@ def get_parameter(param_name, message, choices=None, default=None, none_as_disab
             message=f'[{param_name}] {message}:' ,
             default=default or '',
         ).ask()
-        if isinstance(result, str):
+        if isinstance(result, str) and template_variables:
             result = result.format(**template_variables)
     if (break_on_ctrl_c and result is None):
         exit(1)
@@ -253,8 +260,53 @@ def get_parameter(param_name, message, choices=None, default=None, none_as_disab
 
 def unset_parameter(param_name):
     param_name = param_name.replace('_', '-')
-    if params.get(param_name):
+    if param_name in params:
         value = params[param_name]
         del params[param_name]
         logger.info(f'Cleared {param_name}={value}, from parameters')
 
+
+def ago(time):
+    """ Calculate a '3 hours ago' type string from a python datetime.
+    credits: https://gist.github.com/tonyblundell/2652369
+    """
+    units = {
+        'days': lambda diff: diff.days,
+        'hours': lambda diff: diff.seconds / 3600,
+        'minutes': lambda diff: diff.seconds % 3600 / 60,
+    }
+    diff = datetime.datetime.now().replace(tzinfo=time.tzinfo) - time
+    for unit in units:
+        dur = math.floor(units[unit](diff)) # Run the lambda function to get a duration
+        if dur > 0:
+            unit = unit[:-dur] if dur == 1 else unit # De-pluralize if duration is 1 ('1 day' vs '2 days')
+            return '%s %s ago' % (dur, unit)
+    return 'just now'
+
+
+class IsolatedParameters:
+    """A context manager to run something in isolated set of parameters"""
+    def __enter__(self):
+        self.backup = copy.deepcopy(params)
+
+    def __exit__(self, exc_type, exc_value, traceback):
+        global params
+        params = self.backup
+
+def merge_objects(obj1, obj2, depth=2):
+    """ merging objects with a depth
+
+    unit tests: cid/test/python/test_merge.py
+    """
+    if isinstance(obj1, dict) and isinstance(obj2, dict):
+        result = obj1.copy()
+        for key, value in obj2.items():
+            if depth > 0 and key in result and isinstance(result[key], (dict, list)) and isinstance(value, (dict, list)):
+                result[key] = merge_objects(result[key], value, depth - 1)
+            else:
+                result[key] = value
+        return result
+    elif isinstance(obj1, list) and isinstance(obj2, list):
+        return obj1 + obj2
+    else:
+        return obj2  # If types don't match or if one of them is not a dict or list, prefer the second object.

@@ -1,12 +1,13 @@
-'''
-Source Account                    Destination Account
-┌─────────────────────────┐       ┌──────────────────┐
-│  Analysis    Template   │       │  Master Template │
-│  ┌─┬──┬─┐    ┌──────┐   │       │    ┌──────┐      │
-│  │ │┼┼│ ├────►      ├───┼───────┼────►      │      │
-│  └─┴──┴─┘    └──────┘   │       │    └──────┘      │
-│                         │       │                  │
-└─────────────────────────┘       └──────────────────┘
+''' This module analyses Quicksight Analysis and pulls the definitions of dependencies. 
+
+Here are the types of objects that are processed:
+
+    * QuickSight Analysis
+    * QuickSight DataSets
+    * Athena Views
+    * Glue Tables
+    * Glue Crawlers
+
 '''
 import re
 import time
@@ -15,7 +16,7 @@ import logging
 import yaml
 import boto3
 
-from cid.helpers import Dataset, QuickSight, Athena
+from cid.helpers import Dataset, QuickSight, Athena, Glue
 from cid.helpers import CUR
 from cid.utils import get_parameter, get_parameters, cid_print
 from cid.exceptions import CidCritical
@@ -69,7 +70,17 @@ def choose_analysis(qs):
     return choices[choice]['AnalysisId']
 
 
-def export_analysis(qs, athena):
+def get_theme(analysis):
+    theme_arn = analysis.get('ThemeArn')
+    if not theme_arn:
+        return None
+    if theme_arn.startswith('arn:aws:quicksight::aws:theme/'):
+        return theme_arn.split('/')[-1]
+    logger.warning(f'Theme {theme_arn} is not standard and is not supported yet. Theme will be ignored.')
+    return None
+
+
+def export_analysis(qs, athena, glue):
     """ Export analysis to yaml resource File
     """
 
@@ -90,21 +101,24 @@ def export_analysis(qs, athena):
         AnalysisId=analysis_id
     )['Analysis']
 
-    logger.info("analysing datasets")
+    logger.info("analyzing datasets")
     resources = {}
     resources['dashboards'] = {}
     resources['datasets'] = {}
+    resources['crawlers'] = {}
 
+    theme_id = get_theme(analysis)
 
-    cur_helper = CUR(session=athena.session)
+    cur_helper = CUR(athena=athena, glue=glue)
+
     resources_datasets = []
 
     dataset_references = []
     datasets = {}
     all_views = []
-    all_databases = [] 
+    all_databases = []
     for dataset_arn in analysis['DataSetArns']:
-        dependancy_views = []
+        dependency_views = []
         dataset_id = dataset_arn.split('/')[-1]
         dataset = qs.describe_dataset(dataset_id)
 
@@ -123,7 +137,7 @@ def export_analysis(qs, athena):
         if dataset_name in athena._resources.get('datasets'):
             resources_datasets.append(dataset_name)
             if not get_parameters().get('export-known-datasets'):
-                cid_print(f'    DataSet <BOLD>{dataset_name}<END> is in resources. Skiping.')
+                cid_print(f'    DataSet <BOLD>{dataset_name}<END> is in resources. Skipping.')
                 continue
 
         dataset_data = {
@@ -135,31 +149,45 @@ def export_analysis(qs, athena):
         }
 
         for key, value in dataset_data['PhysicalTableMap'].items():
-            if 'RelationalTable' not in value \
-                or 'DataSourceArn' not in value['RelationalTable'] \
-                or 'Schema' not in value['RelationalTable']:
-                raise CidCritical(f'Dataset {key} does not seems to be Antena dataset. Only Athena datasets are supported.' )
-            all_databases.append(value['RelationalTable']['Schema'])
-            value['RelationalTable']['DataSourceArn'] = '${athena_datasource_arn}'
-            value['RelationalTable']['Schema'] = '${athena_database_name}'
-            athena_source = value['RelationalTable']['Name']
-            views_name = athena_source.split('.')[-1]
-            dependancy_views.append(views_name)
-            all_views.append(views_name)
+            if 'RelationalTable' in value \
+                and 'DataSourceArn' in value['RelationalTable'] \
+                and 'Schema' in value['RelationalTable']:
+                logger.debug(f"Dataset {dataset.raw['DataSetId']} looks like classic athena dataset")
+                value['RelationalTable']['DataSourceArn'] = '${athena_datasource_arn}'
+                all_databases.append(value['RelationalTable']['Schema'])
+                value['RelationalTable']['Schema'] = '${athena_database_name}'
+                athena_source = value['RelationalTable']['Name']
+                views_name = athena_source.split('.')[-1]
+                dependency_views.append(views_name)
+                if views_name in athena._resources.get('views') and not get_parameters().get('export-known-datasets'):
+                    cid_print(f'    Athena view <BOLD>{views_name}<END> is in resources. Skipping')
+                else:
+                    all_views.append(views_name)
+            elif 'CustomSql' in value and 'DataSourceArn' in value['CustomSql']:
+                logger.debug(f"Dataset {dataset.raw['DataSetId']} looks like CustomSql athena dataset")
+                value['CustomSql']['DataSourceArn'] = '${athena_datasource_arn}'
+                databases = [db_['Name'] for db_ in athena.list_databases()]
+                for database in databases:
+                    if f'{database}.' in value['CustomSql']['SqlQuery'] or f'"{database}".' in value['CustomSql']['SqlQuery']:
+                        logger.debug(f"Replacing {database} in text")
+                        value['CustomSql']['SqlQuery'] = value['CustomSql']['SqlQuery'].replace(database, '${athena_database_name}')
+                logger.warning(f"Dataset {dataset.raw['DataSetId']} use SqlQuery. Discovery of tables and views for that is not supported yet. Please add them manually")
+            else:
+                raise CidCritical(f"Dataset {key} {dataset.raw['Name']} do not seems to be Athena dataset. Only Athena datasets are supported." )
 
         for key, value in dataset_data.get('LogicalTableMap', {}).items():
             if 'Source' in value and "DataSetArn" in value['Source']:
-                #FIXME add value['Source']['DataSetArn'] to the list of dataset_arn s 
+                #FIXME add value['Source']['DataSetArn'] to the list of dataset_arn
                 raise CidCritical(f"DataSet {dataset.raw['Name']} contains unsupported join. Please replace join of {value.get('Alias')} from DataSet to DataSource")
 
         dep_cur = False
-        for dep_view in dependancy_views[:]:
+        for dep_view in dependency_views[:]:
             if cur_helper.table_is_cur(name=dep_view):
-                dependancy_views.remove(dep_view)
+                dependency_views.remove(dep_view)
                 dep_cur = True
         datasets[dataset_name] = {
             'data': dataset_data,
-            'dependsOn': {'views': dependancy_views},
+            'dependsOn': {'views': dependency_views},
             'schedules': ['default'], #FIXME: need to read a real schedule
         }
         if dep_cur:
@@ -187,7 +215,7 @@ def export_analysis(qs, athena):
         if isinstance(view_data.get('data'), str):
             view_data['data'] = view_data['data'].replace('CREATE VIEW ', 'CREATE OR REPLACE VIEW ')
 
-        # Analyse dependancies: if the dependancy is CUR there is a special flag
+        # Analyse dependencies: if the dependency is CUR there is a special flag
         deps = view_data.get('dependsOn', {})
         non_cur_dep_views = []
         for dep_view in deps.get('views', []):
@@ -206,8 +234,8 @@ def export_analysis(qs, athena):
                     logger.debug(f'{dep_view_name} skipping as not in the views list')
                 non_cur_dep_views.append(dep_view_name)
         if deps.get('views'):
-             deps['views'] = non_cur_dep_views
-             if not deps['views']:
+            deps['views'] = non_cur_dep_views
+            if not deps['views']:
                 del deps['views']
 
     logger.debug(f'cur_tables = {cur_tables}')
@@ -217,9 +245,47 @@ def export_analysis(qs, athena):
             logger.debug(f'Skipping {key} views - it is a CUR')
             continue
         if isinstance(view_data.get('data'), str):
+            #check if there is dependency on crawler
+            crawler_names = re.findall(r"UPDATED_BY_CRAWLER\W+?'(.+?)''", view_data.get('data'))
+            if crawler_names:
+                crawler_name = crawler_names[0]
+                crawler = {'data': glue.get_crawler(crawler_name)}
+
+                # Post processing
+                for crawler_key in crawler['data'].keys():
+                    if crawler_key not in (
+                        'Name', 'Description', 'Role', 'DatabaseName', 'Targets',
+                        'SchemaChangePolicy', 'RecrawlPolicy', 'Schedule', 'Configuration'
+                        ): # remove all keys that are not needed
+                        crawler['data'].pop(crawler_key, None)
+                if 'Schedule' in crawler['data']['Schedule']:
+                    crawler['data']['Schedule'] = crawler['data']['Schedule']['ScheduleExpression']
+                crawler['data']['Role'] = '${crawler_role_arn}'
+                crawler['data']['DatabaseName'] = "${athena_database_name}"
+                for index, target in enumerate(crawler['data'].get('Targets', [])):
+                    path = target.get('Path')
+                    default = get_parameter(
+                        f'{key}-s3path',
+                        'Please provide default value. (You can use {account_id} variable if needed)',
+                        default=re.sub(r'(\d{12})', '{account_id}', path),
+                        template_variables={'account_id': '{account_id}'},
+                    )
+                    crawler['parameters'] = { #FIXME: path should be the same as for table
+                        's3path': {
+                            'default': default,
+                            'description': f"S3 Path for {key} table",
+                        }
+                    }
+                    crawler['data']['Targets'][index]['Path'] = '${s3path}'
+                crawler_name = key
+                resources['crawlers'][crawler_name] = crawler
+                view_data['crawler'] = crawler_name
+
+
+            # replace location with variables
             locations = re.findall(r"LOCATION\W+?'(s3://.+?)'", view_data.get('data'))
             for location in locations:
-                logger.info(f'Please replace manually location bucket with a parameter: s3://{location}')
+                logger.info(f'Please replace manually location bucket with a parameter: {location}')
                 default = get_parameter(
                     f'{key}-s3path',
                     'Please provide default value. (You can use {account_id} variable if needed)',
@@ -227,30 +293,41 @@ def export_analysis(qs, athena):
                     template_variables={'account_id': '{account_id}'},
                 )
                 view_data['parameters'] = {
-                    f's3path': {
+                    's3path': {
                         'default': default,
                         'description': f"S3 Path for {key} table",
                     }
                 }
                 view_data['data'] = view_data['data'].replace(location, '${s3path}')
 
+            if re.findall(r"PARTITION", view_data.get('data')) and 'crawler' not in view_data:
+                logger.warning(f'The table {key} is partitioned but there no crawler info please make sure partitions are managed some way after install.')
+
         resources['views'][key] = view_data
 
     logger.debug('Building dashboard resource')
     dashboard_id = get_parameter(
         'dashboard-id',
-        message='dashboard id (will be used in url of dashboard)',
-        default=escape_id(analysis['Name'].lower())
+        message='dashboard id (will be used in dashboard URL. Use lowercase, hyphens(not underscores) and make it short but understandable for humans)',
+        default=escape_id(analysis['Name'].lower().replace(' ', '-').replace('_', '-'))
     )
+    new_dashboard_id = dashboard_id.lower().replace(' ', '-').replace('_', '-')
+    if dashboard_id != new_dashboard_id:
+        cid_print('Best practices enforced: {dashboard_id} -> {new_dashboard_id}')
+        dashboard_id = new_dashboard_id
 
     dashboard_resource = {}
+    print(datasets)
     dashboard_resource['dependsOn'] = {
         # Historically CID uses dataset names as dataset reference. IDs of manually created resources have uuid format.
         # We can potentially reconsider this and use IDs at some point
-        'datasets': sorted(list(set([dataset_name for dataset_name in datasets.keys()] + resources_datasets))) 
+        'datasets': sorted(list(set(list(datasets.keys()) + resources_datasets)))
     }
     dashboard_resource['name'] = analysis['Name']
     dashboard_resource['dashboardId'] = dashboard_id
+    dashboard_resource['category'] = get_parameters().get('category', 'Custom')
+    if theme_id:
+         dashboard_resource['theme'] = theme_id
 
     dashboard_export_method = None
     if get_parameters().get('template-id'):
@@ -260,8 +337,8 @@ def export_analysis(qs, athena):
             'dashboard-export-method',
             message='Please choose export method',
             choices={
+                '[template]   Generate a QuickSight Template in the current account (Recommended)': 'template',
                 '[definition] Save QuickSight Dashboard Definition in the file': 'definition',
-                '[template]   Generate a QuickSight Template in the current account': 'template',
             },
         )
     if dashboard_export_method == 'template':
@@ -319,13 +396,13 @@ def export_analysis(qs, athena):
             default='*'
         )
 
-        time.sleep(5) # Some times update_template_permissions does not work immediatly.
+        time.sleep(5) # Some times update_template_permissions does not work immediately.
 
         res = qs.update_template_permissions(
             TemplateId=template_id,
             GrantPermissions=[
                 {
-                    "Principal": f'arn:aws:iam::{reader_account_id}:root' if reader_account_id != '*' else '*',
+                    "Principal": f'arn:{qs.partition}:iam::{reader_account_id}:root' if reader_account_id != '*' else '*',
                     'Actions': [
                         "quicksight:DescribeTemplate",
                     ]
@@ -342,9 +419,9 @@ def export_analysis(qs, athena):
             AnalysisId=analysis_id,
         )['Definition']
 
-        for datasest in definition.get('DataSetIdentifierDeclarations', []):
+        for dataset in definition.get('DataSetIdentifierDeclarations', []):
             # Hide region and account number of the source account
-            datasest["DataSetArn"] = 'arn:aws:quicksight:::dataset/' + datasest["DataSetArn"].split('/')[-1]
+            dataset["DataSetArn"] = f'arn:{qs.partition}:quicksight:::dataset/' + dataset["DataSetArn"].split('/')[-1]
         dashboard_resource['data'] = yaml.safe_dump(definition)
 
     resources['dashboards'][analysis['Name'].upper()] = dashboard_resource
@@ -358,15 +435,21 @@ def export_analysis(qs, athena):
         default=f"{analysis['Name'].replace(' ', '-')}.yaml"
     )
 
-    with open(output, "w") as output_file:
+    with open(output, "w", encoding='utf-8') as output_file:
         output_file.write(yaml.safe_dump(resources, sort_keys=False))
     cid_print(f'Output: <BOLD>{output}<END>')
 
 
-if __name__ == "__main__": # for testing
+def quick_try():
+    ''' just trying the export
+    '''
     logging.basicConfig(level=logging.INFO)
     logging.getLogger('cid').setLevel(logging.DEBUG)
-    qs = QuickSight(boto3.session.Session(), boto3.client('sts').get_caller_identity())
-    athena = Athena(boto3.session.Session(), boto3.client('sts').get_caller_identity())
-    export_analysis(qs, athena)
+    identity = boto3.client('sts').get_caller_identity()
+    qs = QuickSight(boto3.session.Session(), identity)
+    athena = Athena(boto3.session.Session())
+    glue = Glue(boto3.session.Session())
+    export_analysis(qs, athena, glue)
 
+if __name__ == "__main__": # for testing
+    quick_try()
